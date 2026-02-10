@@ -172,6 +172,84 @@ def get_inventory():
     })
 
 
+@app.route('/api/overstocks')
+def get_overstocks():
+    """Get Top 10 Overstocks by value (€) from Inventory quality sheet
+    
+    The Excel chart shows top 10 materials ranked by their STARTING STOCK overstock value,
+    not by total overstock across all periods.
+    """
+    global current_engine, current_file_path
+    
+    if current_file_path is None:
+        return jsonify({'error': 'No file loaded'}), 400
+    
+    try:
+        import pandas as pd
+        
+        # Read the Inventory quality sheet
+        xl = pd.ExcelFile(current_file_path)
+        df = pd.read_excel(xl, sheet_name='Inventory quality')
+        
+        # Get overstock columns
+        overstock_cols = [c for c in df.columns if 'Overstock' in str(c)]
+        
+        # Filter out rows with NaN material number
+        df = df[df['Material number'].notna()]
+        df = df[df['Material name'].notna()]
+        
+        # Get the Starting stock column
+        starting_col = [c for c in overstock_cols if 'Starting' in str(c)][0]
+        
+        # Top 10 by STARTING STOCK overstock value (this matches Excel chart)
+        df_positive = df[df[starting_col] > 0]
+        top10_df = df_positive.nlargest(10, starting_col)
+        
+        # Build period labels
+        periods = []
+        for col in overstock_cols:
+            col_str = str(col).replace('Overstock ', '')
+            if 'Starting' in col_str:
+                periods.append('Overstock Starting stock')
+            elif hasattr(col, 'strftime'):
+                periods.append('Overstock 01-' + col.strftime('%b-%y'))
+            else:
+                periods.append('Overstock ' + col_str)
+        
+        top10 = []
+        for _, row in top10_df.iterrows():
+            period_values = []
+            for col in overstock_cols:
+                val = row[col]
+                period_values.append(float(val) if pd.notna(val) else 0.0)
+            
+            total = sum(period_values)
+            
+            top10.append({
+                'material': str(int(row['Material number'])) if pd.notna(row['Material number']) else '',
+                'name': str(row['Material name']) if pd.notna(row['Material name']) else '',
+                'period_values': period_values,
+                'total_value': total
+            })
+        
+        # Calculate period totals for the chart (sum of top 10 only)
+        period_totals = []
+        for col in overstock_cols:
+            total = top10_df[col].sum()
+            period_totals.append(float(total) if pd.notna(total) else 0.0)
+        
+        return jsonify({
+            'periods': periods,
+            'top10': top10,
+            'period_totals': period_totals,
+            'total_materials_with_overstock': len(df_positive)
+        })
+        
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+
 @app.route('/api/export')
 def export():
     global current_engine

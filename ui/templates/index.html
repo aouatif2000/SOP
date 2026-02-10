@@ -49,6 +49,7 @@
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('planning',this)">Planning</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('capacity',this)">Capacity</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('inventory',this)">Inventory</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('overstocks',this)">Top 10 Overstocks</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('log',this)">Log</button>
         </div>
         <div id="dashboard-tab" class="tab-content">
@@ -100,6 +101,36 @@
                 <div class="overflow-auto max-h-[400px]"><table class="data-table w-full"><thead id="invHead"></thead><tbody id="invBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
             </div>
         </div>
+        <div id="overstocks-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="font-semibold text-lg">Top 10 Overstocks by Value (€)</h3>
+                    <button onclick="exportChartAsPNG()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-white text-sm flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        Export as PNG
+                    </button>
+                </div>
+                <div class="bg-white rounded-lg p-4" id="overstockChartContainer" style="min-height: 450px;">
+                    <canvas id="overstockChart" height="400"></canvas>
+                </div>
+                <div class="mt-4">
+                    <h4 class="font-semibold mb-2">Data Table</h4>
+                    <div class="overflow-auto max-h-[300px]">
+                        <table class="data-table w-full">
+                            <thead id="overstockHead"></thead>
+                            <tbody id="overstockBody"><tr><td class="text-center p-4 text-slate-500">Run calculations to see top overstocks</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="mt-4 p-4 bg-slate-800 rounded-lg text-sm">
+                    <h4 class="font-semibold mb-2">How Overstock Value is Calculated (from Excel):</h4>
+                    <p class="text-slate-300">Overstock = max(0, Inventory Value - Target Stock Value)</p>
+                    <p class="text-slate-400 mt-2">• Data source: "Inventory quality" sheet in Excel</p>
+                    <p class="text-slate-400">• Values are in € (euros)</p>
+                    <p class="text-slate-400">• Materials ranked by total overstock value across all periods</p>
+                </div>
+            </div>
+        </div>
         <div id="log-tab" class="tab-content hidden">
             <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Calculation Log</h3><div id="log" class="bg-slate-900 p-4 rounded-lg max-h-[500px] overflow-auto text-green-400"></div></div>
         </div>
@@ -108,8 +139,9 @@
         <span id="status" class="text-slate-400">Ready</span>
     </footer>
 <script>
-let state = { periods: [], results: null, lineTypes: [] };
+let state = { periods: [], results: null, lineTypes: [], overstockData: [] };
 let utilChart = null;
+let overstockChart = null;
 function log(msg) { const d = document.getElementById('log'); d.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`; d.scrollTop = d.scrollHeight; }
 function status(msg) { document.getElementById('status').textContent = msg; }
 function showTab(name, btn) {
@@ -155,7 +187,7 @@ async function loadResults() {
     const filter = document.getElementById('ltFilter');
     filter.innerHTML = '<option value="all">All Line Types</option>';
     state.lineTypes.forEach(lt => { const c = state.results[lt]?.length || 0; if (c > 0) filter.innerHTML += `<option value="${lt}">${lt} (${c})</option>`; });
-    updateDashboard(); loadPlanningData(); loadCapacityData(); loadInventoryData();
+    updateDashboard(); loadPlanningData(); loadCapacityData(); loadInventoryData(); loadOverstocksData();
 }
 function updateDashboard() {
     let html = '<table class="w-full"><tr class="text-slate-400"><th class="text-left p-2">Line Type</th><th class="text-right p-2">Count</th></tr>';
@@ -220,6 +252,154 @@ async function loadInventoryData() {
 }
 function exportData() { window.location.href = '/api/export'; }
 function fmt(n) { if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return n.toFixed(n % 1 === 0 ? 0 : 1); }
+
+// Top 10 Overstocks Functions
+async function loadOverstocksData() {
+    try {
+        const res = await fetch('/api/overstocks');
+        const data = await res.json();
+        if (data.error) { log('Overstocks error: ' + data.error); return; }
+        
+        state.overstockData = data;
+        renderOverstockChart(data);
+        renderOverstockTable(data);
+    } catch (err) { log('Error loading overstocks: ' + err); }
+}
+
+function renderOverstockChart(data) {
+    const ctx = document.getElementById('overstockChart').getContext('2d');
+    if (overstockChart) overstockChart.destroy();
+    
+    // Use the same period labels as Excel
+    const periods = data.periods.map(p => {
+        // Format: "Overstock Starting stock" -> "Overstock\nStarting stock"
+        // "Overstock 01-Dec-25" -> "Overstock 01-\nDec-25"
+        if (p.includes('Starting')) return 'Overstock\nStarting stock';
+        return p.replace('Overstock ', 'Overstock 01-\n').replace('01-\n01-', '01-\n');
+    });
+    
+    // Colors matching Excel chart
+    const colors = [
+        '#4472C4', // Blue (Silica SILEX CS)
+        '#ED7D31', // Orange (ATH DADCO)
+        '#A5A5A5', // Gray (H-Magnesite)
+        '#FFC000', // Yellow (ATH SG7HB PO)
+        '#5B9BD5', // Light blue (DYNASYLAN)
+        '#70AD47', // Green (WATER SOFTENING)
+        '#9E7CC3', // Purple (ATH SG40 PO)
+        '#F4B183', // Light orange (DOLOMITE SAND)
+        '#C9C9C9', // Light gray (Bentonite)
+        '#FFD966'  // Light yellow (ATH SG10S8)
+    ];
+    
+    const datasets = data.top10.map((item, i) => ({
+        label: item.name,
+        data: item.period_values,
+        backgroundColor: colors[i % colors.length],
+        borderColor: colors[i % colors.length],
+        borderWidth: 0
+    }));
+    
+    overstockChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: periods, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { 
+                    position: 'bottom', 
+                    labels: { 
+                        color: '#333', 
+                        font: { size: 9 }, 
+                        boxWidth: 10,
+                        padding: 8
+                    }
+                },
+                title: {
+                    display: true,
+                    text: 'Top 10 Overstocks',
+                    color: '#333',
+                    font: { size: 16, weight: 'bold' }
+                }
+            },
+            scales: {
+                x: { 
+                    stacked: true, 
+                    grid: { display: false }, 
+                    ticks: { 
+                        color: '#333', 
+                        font: { size: 9 },
+                        maxRotation: 45,
+                        minRotation: 45
+                    }
+                },
+                y: { 
+                    stacked: true, 
+                    grid: { color: '#e0e0e0' }, 
+                    ticks: { 
+                        color: '#333',
+                        callback: v => '€' + (v >= 1000000 ? (v/1000000).toFixed(0) + ' 000 000' : v >= 1000 ? (v/1000).toFixed(0) + ' 000' : v)
+                    },
+                    title: { 
+                        display: true, 
+                        text: 'Value (€)', 
+                        color: '#333',
+                        font: { size: 11 }
+                    }
+                }
+            }
+        }
+    });
+}
+
+function renderOverstockTable(data) {
+    const periods = data.periods;
+    document.getElementById('overstockHead').innerHTML = `
+        <tr class="text-slate-400">
+            <th>Rank</th><th>Material</th><th>Name</th>
+            ${periods.map(p => `<th class="text-right">${p}</th>`).join('')}
+            <th class="text-right">Total €</th>
+        </tr>`;
+    
+    let html = data.top10.map((item, i) => `
+        <tr>
+            <td class="text-center font-bold text-yellow-400">#${i + 1}</td>
+            <td class="font-mono">${item.material}</td>
+            <td>${item.name.substring(0, 30)}</td>
+            ${item.period_values.map(v => `<td class="text-right">€${fmt(v)}</td>`).join('')}
+            <td class="text-right font-bold text-green-400">€${fmt(item.total_value)}</td>
+        </tr>
+    `).join('');
+    
+    document.getElementById('overstockBody').innerHTML = html || '<tr><td colspan="15" class="text-center p-4">No overstock data</td></tr>';
+}
+
+function exportChartAsPNG() {
+    const canvas = document.getElementById('overstockChart');
+    if (!canvas) { alert('Chart not available'); return; }
+    
+    // Create a temporary canvas with white background (like Excel)
+    const tempCanvas = document.createElement('canvas');
+    const ctx = tempCanvas.getContext('2d');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    
+    // Fill with white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+    
+    // Draw the chart on top
+    ctx.drawImage(canvas, 0, 0);
+    
+    // Create download link
+    const link = document.createElement('a');
+    link.download = 'Top10_Overstocks_' + new Date().toISOString().slice(0, 10) + '.png';
+    link.href = tempCanvas.toDataURL('image/png');
+    link.click();
+    
+    log('Chart exported as PNG: ' + link.download);
+}
 </script>
 </body>
 </html>
