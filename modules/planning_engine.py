@@ -1,410 +1,263 @@
 """
-S&OP Planning Engine - Main Planning Engine
-Orchestrates all calculation modules to produce complete planning output.
-
-KEY LOGIC:
-- Reads Production Plans from Excel (VBA already calculated them)
-- Uses Production Plans for BOM explosion (not forecast!)
-- Formula: Dependent Demand = Parent Production Plan × BOM Qty Per
+S&OP Planning Engine - Complete Calculation Engine
+KEY FORMULAS (from feedback):
+- Line 02: Dependent Demand = Parent Prod Plan × BOM qty_per (Aux2)
+- Line 10: Utilization Rate - show 2 decimal places
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 from collections import defaultdict
-
 from modules.models import PlanningRow, LineType
 from modules.data_loader import DataLoader
-from modules.forecast_engine import ForecastEngine
 from modules.capacity_engine import CapacityEngine
 
 
 class PlanningEngine:
-    """
-    Main orchestrator for S&OP planning calculations.
-    
-    Key insight: BOM explosion must use PRODUCTION PLAN (not forecast).
-    We read production plans from Excel since VBA already calculated them.
-    """
-    
     EXPECTED_LINE_TYPES = [
-        LineType.DEMAND_FORECAST.value,
-        LineType.DEPENDENT_DEMAND.value,
-        LineType.TOTAL_DEMAND.value,
-        LineType.INVENTORY.value,
-        LineType.MIN_TARGET_STOCK.value,
-        LineType.PRODUCTION_PLAN.value,
-        LineType.PURCHASE_RECEIPT.value,
-        LineType.PURCHASE_PLAN.value,
-        LineType.CAPACITY_UTILIZATION.value,
-        LineType.DEPENDENT_REQUIREMENTS.value,
-        LineType.AVAILABLE_CAPACITY.value,
-        LineType.UTILIZATION_RATE.value,
-        LineType.SHIFT_AVAILABILITY.value,
-        LineType.FTE_REQUIREMENTS.value,
+        LineType.DEMAND_FORECAST.value, LineType.DEPENDENT_DEMAND.value,
+        LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
+        LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
+        LineType.PURCHASE_RECEIPT.value, LineType.PURCHASE_PLAN.value,
+        LineType.CAPACITY_UTILIZATION.value, LineType.DEPENDENT_REQUIREMENTS.value,
+        LineType.AVAILABLE_CAPACITY.value, LineType.UTILIZATION_RATE.value,
+        LineType.SHIFT_AVAILABILITY.value, LineType.FTE_REQUIREMENTS.value,
     ]
     
     def __init__(self, file_path: str):
         self.file_path = file_path
-        self.data: Optional[DataLoader] = None
-        
-        # Intermediate results
-        self.forecast_data: Dict[str, Dict[str, float]] = {}
-        self.dependent_demand: Dict[str, Dict[str, float]] = {}
-        self.total_demand: Dict[str, Dict[str, float]] = {}
-        self.production_plan: Dict[str, Dict[str, float]] = {}
-        self.purchase_plan: Dict[str, Dict[str, float]] = {}
-        
-        # Final results
-        self.results: Dict[str, List[PlanningRow]] = {}
-        self.all_rows: List[PlanningRow] = []
-        self.summary: Dict = {}
+        self.data = None
+        self.xl = None
+        self.bom_df = None
+        self.forecast_data = {}
+        self.dependent_demand = {}
+        self.total_demand = {}
+        self.production_plan = {}
+        self.purchase_receipt = {}
+        self.results = {}
+        self.all_rows = []
+        self.summary = {}
     
-    def run(self) -> 'PlanningEngine':
-        """Run the complete planning calculation pipeline."""
+    def run(self):
         print("\n" + "=" * 70)
         print("S&OP PLANNING ENGINE")
-        print("(Using Production Plan from Excel for BOM explosion)")
         print("=" * 70)
         
-        # Step 1: Load raw data
-        print("\n[STEP 1] Loading raw input data...")
-        self.data = DataLoader(self.file_path)
-        self.data.load_all()
+        print("\n[1] Loading data...")
+        self._load_all_data()
         
-        # Step 2: Read production plans from Excel
-        print("\n[STEP 2] Reading Production Plans from Excel...")
-        self._read_production_plans_from_excel()
+        print("\n[2] Loading Production Plans...")
+        self._load_production_plans()
         
-        # Step 3: Calculate demand forecast
-        print("\n[STEP 3] Calculating Demand Forecast...")
-        forecast_engine = ForecastEngine(self.data)
-        forecast_rows = forecast_engine.calculate()
-        self.results[LineType.DEMAND_FORECAST.value] = forecast_rows
-        self.forecast_data = forecast_engine.get_all_forecasts()
+        print("\n[3] Calculating Line 01 - Forecast...")
+        self._calc_line_01()
         
-        # Step 4: BOM explosion using production plans
-        print("\n[STEP 4] BOM Explosion (using Production Plans)...")
-        self._calculate_dependent_demand()
+        print("\n[4] Calculating Line 02 - Dependent Demand...")
+        self._calc_line_02()
         
-        # Step 5: Generate all planning rows
-        print("\n[STEP 5] Generating planning rows...")
-        self._generate_planning_rows()
+        print("\n[5] Calculating Line 03 - Total Demand...")
+        self._calc_line_03()
         
-        # Step 6: Capacity calculations
-        print("\n[STEP 6] Capacity calculations...")
-        capacity_engine = CapacityEngine(self.data, self.production_plan)
-        for line_type, rows in capacity_engine.calculate().items():
-            self.results[line_type] = rows
+        print("\n[6] Loading Lines 04-07...")
+        self._load_lines_04_07()
         
-        # Finalize
-        self._compile_all_rows()
-        self._validate_output()
-        self._generate_summary()
+        print("\n[7] Generating Line 08...")
+        self._gen_line_08()
         
-        print("\n" + "=" * 70)
-        print("CALCULATION COMPLETE")
-        print("=" * 70)
-        self._print_summary()
+        print("\n[8] Capacity Lines (09-12)...")
+        self._calc_capacity()
         
+        self._finalize()
         return self
     
-    def _read_production_plans_from_excel(self):
-        """Read Production Plans from Excel Planning sheet."""
-        xl = pd.ExcelFile(self.file_path)
-        planning_df = pd.read_excel(xl, sheet_name='Planning sheet')
-        
+    def _load_all_data(self):
+        self.xl = pd.ExcelFile(self.file_path)
+        self.data = DataLoader(self.file_path)
+        self.data.load_all()
+        self.bom_df = pd.read_excel(self.xl, sheet_name='BOM')
+        self.bom_df['qty_per'] = self.bom_df['BILLOFMATERIALITEMQUANTITY'] / self.bom_df['BOM Header Quantity in Base UoM']
+        self.bom_df['Material'] = self.bom_df['Material'].astype(str)
+        self.bom_df['Component'] = self.bom_df['Component'].astype(str)
+        self.periods = self.data.periods
+        print(f"  BOM: {len(self.bom_df)}, Periods: {len(self.periods)}")
+    
+    def _load_production_plans(self):
+        planning_df = pd.read_excel(self.xl, sheet_name='Planning sheet')
+        planning_df['Material number'] = planning_df['Material number'].astype(str)
         period_cols = [c for c in planning_df.columns if hasattr(c, 'strftime')][:12]
-        self.data.periods = [c.strftime('%Y-%m') for c in period_cols]
         
-        # Production Plan
-        prod_rows = planning_df[planning_df['Line type'] == '06. Production plan']
-        for _, row in prod_rows.iterrows():
-            mat_id = str(row.get('Material number', ''))
+        for _, row in planning_df[planning_df['Line type'] == '06. Production plan'].iterrows():
+            mat_id = str(row['Material number'])
             if mat_id and mat_id != 'nan':
-                self.production_plan[mat_id] = {
-                    col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0
-                    for col in period_cols
-                }
-        print(f"       → Loaded {len(self.production_plan)} production plans")
+                self.production_plan[mat_id] = {col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0 for col in period_cols}
         
-        # Purchase Receipt
-        purch_rows = planning_df[planning_df['Line type'] == '06. Purchase receipt']
-        for _, row in purch_rows.iterrows():
-            mat_id = str(row.get('Material number', ''))
+        for _, row in planning_df[planning_df['Line type'] == '06. Purchase receipt'].iterrows():
+            mat_id = str(row['Material number'])
             if mat_id and mat_id != 'nan':
-                self.purchase_plan[mat_id] = {
-                    col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0
-                    for col in period_cols
-                }
-        print(f"       → Loaded {len(self.purchase_plan)} purchase receipts")
+                self.purchase_receipt[mat_id] = {col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0 for col in period_cols}
+        
+        print(f"  Production: {len(self.production_plan)}, Purchase: {len(self.purchase_receipt)}")
     
-    def _calculate_dependent_demand(self):
-        """
-        Calculate dependent demand using PRODUCTION PLAN from Excel.
-        Formula: Dependent Demand = Parent Production Plan × BOM Qty Per
-        """
-        # Initialize
+    def _calc_line_01(self):
+        rows = []
+        for mat_id, forecast_dict in self.data.forecasts.items():
+            mat = self.data.materials.get(mat_id)
+            if not mat: continue
+            values = {p: forecast_dict.get(p, 0.0) for p in self.periods}
+            fvals = list(values.values())
+            aux1 = sum(fvals)
+            aux2 = (fvals[0] + sum(fvals[1:])/11*11)/12 if len(fvals) > 1 else (fvals[0] if fvals else 0)
+            self.forecast_data[mat_id] = values
+            rows.append(PlanningRow(
+                material_number=mat_id, material_name=mat.name,
+                product_type=mat.product_type.value, product_family=mat.product_family,
+                spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
+                product_name=mat.product_name or '', line_type=LineType.DEMAND_FORECAST.value,
+                aux_column=f"{aux1:.3f}" if aux1 > 0 else '', aux_2_column=f"{aux2:.3f}" if aux2 > 0 else '',
+                values=values))
+        rows.sort(key=lambda r: int(r.material_number) if r.material_number.isdigit() else 0)
+        self.results[LineType.DEMAND_FORECAST.value] = rows
+        print(f"  [01]: {len(rows)} rows")
+    
+    def _calc_line_02(self):
+        rows = []
         for mat_id in self.data.materials:
-            self.dependent_demand[mat_id] = {p: 0.0 for p in self.data.periods}
+            self.dependent_demand[mat_id] = {p: 0.0 for p in self.periods}
         
-        # BOM explosion
-        for bom_item in self.data.bom:
-            if bom_item.is_coproduct:
-                continue
+        for _, bom in self.bom_df.iterrows():
+            parent, child, qty = str(bom['Material']), str(bom['Component']), bom['qty_per']
+            if pd.isna(qty) or qty <= 0: continue
+            parent_plan = self.production_plan.get(parent, {})
+            if not parent_plan or not any(v > 0 for v in parent_plan.values()): continue
+            child_mat = self.data.materials.get(child)
+            if not child_mat: continue
             
-            parent = bom_item.parent_material
-            child = bom_item.component_material
-            qty_per = bom_item.quantity_per
+            values, has = {}, False
+            for p in self.periods:
+                demand = parent_plan.get(p, 0.0) * qty
+                values[p] = demand
+                if child not in self.dependent_demand:
+                    self.dependent_demand[child] = {pp: 0.0 for pp in self.periods}
+                self.dependent_demand[child][p] += demand
+                if demand > 0: has = True
             
-            parent_plan = self.production_plan.get(parent, self.purchase_plan.get(parent, {}))
-            
-            for period in self.data.periods:
-                parent_qty = parent_plan.get(period, 0.0)
-                if parent_qty > 0:
-                    if child not in self.dependent_demand:
-                        self.dependent_demand[child] = {p: 0.0 for p in self.data.periods}
-                    self.dependent_demand[child][period] += parent_qty * qty_per
+            if has:
+                rows.append(PlanningRow(
+                    material_number=child, material_name=child_mat.name,
+                    product_type=child_mat.product_type.value, product_family=child_mat.product_family,
+                    spc_product=child_mat.spc_product or '', product_cluster=child_mat.product_cluster or '',
+                    product_name=child_mat.product_name or '', line_type=LineType.DEPENDENT_DEMAND.value,
+                    aux_column=parent, aux_2_column=f"{qty:.6f}", values=values))
         
-        count = sum(1 for d in self.dependent_demand.values() if any(v > 0 for v in d.values()))
-        print(f"       → {count} materials with dependent demand")
+        rows.sort(key=lambda r: (int(r.material_number) if r.material_number.isdigit() else 0, r.aux_column or ''))
+        self.results[LineType.DEPENDENT_DEMAND.value] = rows
+        print(f"  [02]: {len(rows)} rows")
     
-    def _generate_planning_rows(self):
-        """Generate all planning rows."""
-        
-        # Line 02: Dependent Demand
-        rows_02 = []
-        for mat_id, demand in self.dependent_demand.items():
-            if any(v > 0 for v in demand.values()):
+    def _calc_line_03(self):
+        rows = []
+        for mat_id in self.data.materials:
+            f = self.forecast_data.get(mat_id, {})
+            d = self.dependent_demand.get(mat_id, {})
+            values = {p: f.get(p, 0) + d.get(p, 0) for p in self.periods}
+            if any(v > 0 for v in values.values()):
                 mat = self.data.materials.get(mat_id)
                 if mat:
-                    rows_02.append(PlanningRow(
-                        material_number=mat_id, material_name=mat.name,
-                        product_type=mat.product_type.value, product_family=mat.product_family,
-                        spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                        product_name=mat.product_name or '', line_type=LineType.DEPENDENT_DEMAND.value,
-                        values=demand.copy()
-                    ))
-        self.results[LineType.DEPENDENT_DEMAND.value] = rows_02
-        print(f"  [02] Dependent Demand: {len(rows_02)} materials")
-        
-        # Calculate total demand
-        for mat_id in self.data.materials:
-            forecast = self.forecast_data.get(mat_id, {})
-            dependent = self.dependent_demand.get(mat_id, {})
-            self.total_demand[mat_id] = {
-                p: forecast.get(p, 0.0) + dependent.get(p, 0.0)
-                for p in self.data.periods
-            }
-        
-        # Line 03: Total Demand
-        rows_03 = []
-        for mat_id, demand in self.total_demand.items():
-            if any(v > 0 for v in demand.values()):
-                mat = self.data.materials.get(mat_id)
-                if mat:
-                    rows_03.append(PlanningRow(
+                    self.total_demand[mat_id] = values
+                    rows.append(PlanningRow(
                         material_number=mat_id, material_name=mat.name,
                         product_type=mat.product_type.value, product_family=mat.product_family,
                         spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
                         product_name=mat.product_name or '', line_type=LineType.TOTAL_DEMAND.value,
-                        values=demand.copy()
-                    ))
-        self.results[LineType.TOTAL_DEMAND.value] = rows_03
-        print(f"  [03] Total Demand: {len(rows_03)} materials")
-        
-        # Read Lines 04, 05 from Excel
-        self._read_inventory_from_excel()
-        
-        # Line 06: Production Plan
-        rows_06_prod = []
-        for mat_id, plan in self.production_plan.items():
-            if any(v > 0 for v in plan.values()):
-                mat = self.data.materials.get(mat_id)
-                if mat:
-                    rows_06_prod.append(PlanningRow(
-                        material_number=mat_id, material_name=mat.name,
-                        product_type=mat.product_type.value, product_family=mat.product_family,
-                        spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                        product_name=mat.product_name or '', line_type=LineType.PRODUCTION_PLAN.value,
-                        starting_stock=self.data.stock_levels.get(mat_id, 0.0),
-                        values=plan.copy()
-                    ))
-        self.results[LineType.PRODUCTION_PLAN.value] = rows_06_prod
-        print(f"  [06] Production Plan: {len(rows_06_prod)} materials")
-        
-        # Line 06: Purchase Receipt
-        rows_06_purch = []
-        for mat_id, plan in self.purchase_plan.items():
-            if any(v > 0 for v in plan.values()):
-                mat = self.data.materials.get(mat_id)
-                if mat:
-                    rows_06_purch.append(PlanningRow(
-                        material_number=mat_id, material_name=mat.name,
-                        product_type=mat.product_type.value, product_family=mat.product_family,
-                        spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                        product_name=mat.product_name or '', line_type=LineType.PURCHASE_RECEIPT.value,
-                        starting_stock=self.data.stock_levels.get(mat_id, 0.0),
-                        values=plan.copy()
-                    ))
-        self.results[LineType.PURCHASE_RECEIPT.value] = rows_06_purch
-        print(f"  [06] Purchase Receipt: {len(rows_06_purch)} materials")
-        
-        # Line 07: Purchase Plan
-        rows_07 = []
-        for i, (mat_id, plan) in enumerate(self.purchase_plan.items(), 1):
-            if any(v > 0 for v in plan.values()):
-                mat = self.data.materials.get(mat_id)
-                if mat:
-                    rows_07.append(PlanningRow(
-                        material_number=mat_id, material_name=mat.name,
-                        product_type=mat.product_type.value, product_family=mat.product_family,
-                        spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                        product_name=mat.product_name or '', line_type=LineType.PURCHASE_PLAN.value,
-                        aux_column=str(i), values=plan.copy()
-                    ))
-        self.results[LineType.PURCHASE_PLAN.value] = rows_07
-        print(f"  [07] Purchase Plan: {len(rows_07)} materials")
-        
-        # Line 08: Dependent Requirements
-        self._generate_dependent_requirements()
+                        values=values))
+        rows.sort(key=lambda r: int(r.material_number) if r.material_number.isdigit() else 0)
+        self.results[LineType.TOTAL_DEMAND.value] = rows
+        print(f"  [03]: {len(rows)} rows")
     
-    def _read_inventory_from_excel(self):
-        """Read inventory and target stock from Excel."""
-        xl = pd.ExcelFile(self.file_path)
-        planning_df = pd.read_excel(xl, sheet_name='Planning sheet')
-        period_cols = [c for c in planning_df.columns if hasattr(c, 'strftime')][:12]
+    def _load_lines_04_07(self):
+        df = pd.read_excel(self.xl, sheet_name='Planning sheet')
+        df['Material number'] = df['Material number'].astype(str)
+        pcols = [c for c in df.columns if hasattr(c, 'strftime')][:12]
         
-        # Line 04: Inventory
-        rows_04 = []
-        for _, row in planning_df[planning_df['Line type'] == '04. Inventory'].iterrows():
-            mat_id = str(row.get('Material number', ''))
-            mat = self.data.materials.get(mat_id) if mat_id != 'nan' else None
-            if mat:
-                values = {col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0 for col in period_cols}
-                starting = float(row.get('Starting stock', 0)) if pd.notna(row.get('Starting stock')) else 0.0
-                rows_04.append(PlanningRow(
+        for lt, lt_enum in [('04. Inventory', LineType.INVENTORY), ('05. Minimum target stock', LineType.MIN_TARGET_STOCK),
+                           ('06. Production plan', LineType.PRODUCTION_PLAN), ('06. Purchase receipt', LineType.PURCHASE_RECEIPT),
+                           ('07. Purchase plan', LineType.PURCHASE_PLAN)]:
+            rows = []
+            for _, r in df[df['Line type'] == lt].iterrows():
+                mat_id = str(r['Material number'])
+                if mat_id == 'nan': continue
+                mat = self.data.materials.get(mat_id)
+                if not mat: continue
+                values = {c.strftime('%Y-%m'): float(r[c]) if pd.notna(r[c]) else 0.0 for c in pcols}
+                aux = str(r.get('Aux Column', '')) if pd.notna(r.get('Aux Column')) else ''
+                aux2 = str(r.get('Aux 2 Column', '')) if pd.notna(r.get('Aux 2 Column')) else ''
+                start = float(r.get('Starting stock', 0)) if pd.notna(r.get('Starting stock')) else 0.0
+                rows.append(PlanningRow(
                     material_number=mat_id, material_name=mat.name,
                     product_type=mat.product_type.value, product_family=mat.product_family,
                     spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                    product_name=mat.product_name or '', line_type=LineType.INVENTORY.value,
-                    starting_stock=starting, values=values
-                ))
-        self.results[LineType.INVENTORY.value] = rows_04
-        print(f"  [04] Inventory: {len(rows_04)} materials")
-        
-        # Line 05: Target Stock
-        rows_05 = []
-        for _, row in planning_df[planning_df['Line type'] == '05. Minimum target stock'].iterrows():
-            mat_id = str(row.get('Material number', ''))
-            mat = self.data.materials.get(mat_id) if mat_id != 'nan' else None
-            if mat:
-                values = {col.strftime('%Y-%m'): float(row[col]) if pd.notna(row[col]) else 0.0 for col in period_cols}
-                rows_05.append(PlanningRow(
-                    material_number=mat_id, material_name=mat.name,
-                    product_type=mat.product_type.value, product_family=mat.product_family,
-                    spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                    product_name=mat.product_name or '', line_type=LineType.MIN_TARGET_STOCK.value,
-                    values=values
-                ))
-        self.results[LineType.MIN_TARGET_STOCK.value] = rows_05
-        print(f"  [05] Target Stock: {len(rows_05)} materials")
+                    product_name=mat.product_name or '', line_type=lt_enum.value,
+                    aux_column=aux, aux_2_column=aux2, starting_stock=start, values=values))
+            rows.sort(key=lambda x: int(x.material_number) if x.material_number.isdigit() else 0)
+            self.results[lt_enum.value] = rows
+            print(f"  [{lt[:2]}]: {len(rows)} rows")
     
-    def _generate_dependent_requirements(self):
-        """Generate Line 08: Dependent Requirements (detail by parent)."""
-        details: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-        
-        for bom_item in self.data.bom:
-            if bom_item.is_coproduct:
-                continue
-            parent, child, qty_per = bom_item.parent_material, bom_item.component_material, bom_item.quantity_per
-            parent_plan = self.production_plan.get(parent, self.purchase_plan.get(parent, {}))
-            
-            for period in self.data.periods:
-                if parent_plan.get(period, 0) > 0:
-                    details[child][parent][period] += parent_plan[period] * qty_per
-        
-        rows_08 = []
-        for child, parents in details.items():
-            mat = self.data.materials.get(child)
-            if not mat:
-                continue
-            for parent, periods in parents.items():
-                if any(v > 0 for v in periods.values()):
-                    rows_08.append(PlanningRow(
-                        material_number=child, material_name=mat.name,
-                        product_type=mat.product_type.value, product_family=mat.product_family,
-                        spc_product=mat.spc_product or '', product_cluster=mat.product_cluster or '',
-                        product_name=mat.product_name or '', line_type=LineType.DEPENDENT_REQUIREMENTS.value,
-                        aux_column=parent, values=dict(periods)
-                    ))
-        self.results[LineType.DEPENDENT_REQUIREMENTS.value] = rows_08
-        print(f"  [08] Dependent Requirements: {len(rows_08)} detail rows")
+    def _gen_line_08(self):
+        rows = []
+        for _, bom in self.bom_df.iterrows():
+            parent, child, qty = str(bom['Material']), str(bom['Component']), bom['qty_per']
+            if pd.isna(qty) or qty <= 0: continue
+            parent_plan = self.production_plan.get(parent, {})
+            if not parent_plan or not any(v > 0 for v in parent_plan.values()): continue
+            child_mat = self.data.materials.get(child)
+            if not child_mat: continue
+            values = {p: parent_plan.get(p, 0.0) * qty for p in self.periods}
+            if any(v > 0 for v in values.values()):
+                rows.append(PlanningRow(
+                    material_number=child, material_name=child_mat.name,
+                    product_type=child_mat.product_type.value, product_family=child_mat.product_family,
+                    spc_product=child_mat.spc_product or '', product_cluster=child_mat.product_cluster or '',
+                    product_name=child_mat.product_name or '', line_type=LineType.DEPENDENT_REQUIREMENTS.value,
+                    aux_column=parent, aux_2_column=f"{qty:.6f}", values=values))
+        rows.sort(key=lambda r: (int(r.material_number) if r.material_number.isdigit() else 0, r.aux_column or ''))
+        self.results[LineType.DEPENDENT_REQUIREMENTS.value] = rows
+        print(f"  [08]: {len(rows)} rows")
     
-    def _compile_all_rows(self):
-        """Compile all rows in order."""
+    def _calc_capacity(self):
+        cap = CapacityEngine(self.data, self.production_plan)
+        for lt, rows in cap.calculate().items():
+            rows.sort(key=lambda r: r.material_number)
+            self.results[lt] = rows
+            print(f"  [{lt[:2]}]: {len(rows)} rows")
+    
+    def _finalize(self):
         self.all_rows = []
         for lt in self.EXPECTED_LINE_TYPES:
-            self.all_rows.extend(self.results.get(lt, []))
+            rows = self.results.get(lt, [])
+            rows.sort(key=lambda r: int(r.material_number) if r.material_number.isdigit() else float('inf'))
+            self.all_rows.extend(rows)
+        self.summary = {'total_rows': len(self.all_rows), 'line_types_count': len([lt for lt, r in self.results.items() if r]),
+                       'line_types': {lt: len(r) for lt, r in self.results.items()}, 'periods': self.periods}
+        print(f"\nTotal: {len(self.all_rows)} rows")
     
-    def _validate_output(self):
-        """Validate output."""
-        print("\n[VALIDATION] Checking output...")
-        active = [lt for lt, rows in self.results.items() if rows]
-        print(f"  Line types with data: {len(active)}")
-        print("  ✓ Validation passed")
+    def get_all_rows(self): return self.all_rows
+    def get_rows_by_type(self, lt): return self.results.get(lt, [])
+    def get_summary(self): return self.summary
     
-    def _generate_summary(self):
-        """Generate summary."""
-        self.summary = {
-            'total_rows': len(self.all_rows),
-            'line_types_count': len([lt for lt, rows in self.results.items() if rows]),
-            'line_types': {lt: len(rows) for lt, rows in self.results.items()},
-            'materials': len(self.data.materials),
-            'periods': len(self.data.periods),
-            'period_list': self.data.periods,
-        }
+    def to_dataframe(self):
+        rows = []
+        for r in self.all_rows:
+            d = {'Material number': r.material_number, 'Material name': r.material_name,
+                 'Product type': r.product_type, 'Product family': r.product_family,
+                 'Line type': r.line_type, 'Aux Column': r.aux_column, 'Aux 2 Column': r.aux_2_column,
+                 'Starting stock': r.starting_stock}
+            d.update(r.values)
+            rows.append(d)
+        return pd.DataFrame(rows)
     
-    def _print_summary(self):
-        """Print summary."""
-        print(f"\nSummary: {self.summary['total_rows']} rows, {self.summary['line_types_count']} line types")
-        for lt in self.EXPECTED_LINE_TYPES:
-            print(f"  {lt}: {self.summary['line_types'].get(lt, 0)}")
+    def to_excel(self, path):
+        self.to_dataframe().to_excel(path, index=False)
     
-    def get_all_rows(self) -> List[PlanningRow]:
-        return self.all_rows
-    
-    def get_rows_by_type(self, line_type: str) -> List[PlanningRow]:
-        return self.results.get(line_type, [])
-    
-    def get_summary(self) -> Dict:
-        return self.summary
-    
-    def to_dataframe(self) -> pd.DataFrame:
-        """Convert to DataFrame."""
-        rows_data = []
-        for row in self.all_rows:
-            row_dict = {
-                'Material number': row.material_number, 'Material name': row.material_name,
-                'Product type': row.product_type, 'Product family': row.product_family,
-                'SPC product': row.spc_product, 'Product cluster': row.product_cluster,
-                'Product name': row.product_name, 'Line type': row.line_type,
-                'Aux Column': row.aux_column, 'Aux 2 Column': row.aux_2_column,
-                'Starting stock': row.starting_stock,
-            }
-            row_dict.update(row.values)
-            rows_data.append(row_dict)
-        return pd.DataFrame(rows_data)
-    
-    def to_excel(self, output_path: str):
-        """Export to Excel."""
-        self.to_dataframe().to_excel(output_path, sheet_name='Planning Results', index=False)
-        print(f"\nExported to: {output_path}")
-    
-    def to_json(self) -> Dict:
-        """Convert to JSON."""
-        return {
-            'summary': self.summary,
-            'periods': self.data.periods,
-            'results': {lt: [r.to_dict() for r in rows] for lt, rows in self.results.items()}
-        }
+    def to_json(self):
+        return {'summary': self.summary, 'periods': self.periods,
+                'results': {lt: [r.to_dict() for r in rows] for lt, rows in self.results.items()}}

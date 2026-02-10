@@ -211,12 +211,39 @@ async function loadUtilChart() {
 function loadPlanningData() {
     const lt = document.getElementById('ltFilter').value;
     const periods = state.periods.slice(0, 10);
-    document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Family</th><th>Line Type</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+    
+    // Updated header with Aux Column and Aux 2 Column
+    document.getElementById('planHead').innerHTML = `<tr class="text-slate-400">
+        <th>Material</th><th>Name</th><th>Family</th><th>Line Type</th>
+        <th>Aux Column</th><th>Aux 2 Column</th>
+        ${periods.map(p => `<th class="text-right">${p}</th>`).join('')}
+    </tr>`;
+    
     let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
+    
+    // Sort by Material ID (numeric, small to big)
+    items = items.slice().sort((a, b) => {
+        const numA = parseInt(a.material_number) || 0;
+        const numB = parseInt(b.material_number) || 0;
+        if (numA !== numB) return numA - numB;
+        // Secondary sort by line type
+        return (a.line_type || '').localeCompare(b.line_type || '');
+    });
+    
     document.getElementById('rowCount').textContent = items.length;
-    // Show ALL rows - removed the slice(0, 500) limit
-    let html = items.map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td>${(item.product_family || '').substring(0, 12)}</td><td class="text-xs">${item.line_type}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
-    document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+    
+    // Show ALL rows with Aux columns
+    let html = items.map(item => `<tr>
+        <td class="font-mono">${item.material_number}</td>
+        <td>${(item.material_name || '').substring(0, 20)}</td>
+        <td>${(item.product_family || '').substring(0, 12)}</td>
+        <td class="text-xs">${item.line_type}</td>
+        <td class="text-xs">${item.aux_column || ''}</td>
+        <td class="text-xs">${item.aux_2_column || ''}</td>
+        ${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}
+    </tr>`).join('');
+    
+    document.getElementById('planBody').innerHTML = html || '<tr><td colspan="16" class="text-center p-4">No data</td></tr>';
 }
 function filterTable() { const s = document.getElementById('matSearch').value.toLowerCase(); document.querySelectorAll('#planBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; }); }
 async function loadCapacityData() {
