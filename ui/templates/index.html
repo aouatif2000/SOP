@@ -15,9 +15,12 @@
         .tab-btn.active { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; }
         .data-table th { background: rgba(59, 130, 246, 0.2); position: sticky; top: 0; z-index: 10; }
         .data-table td, .data-table th { border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 12px; }
-        .heatmap-green { background: rgba(34, 197, 94, 0.3); }
-        .heatmap-yellow { background: rgba(234, 179, 8, 0.3); }
-        .heatmap-red { background: rgba(239, 68, 68, 0.3); }
+        .heatmap-green { background: rgba(34, 197, 94, 0.3); color: #86efac; }
+        .heatmap-yellow { background: rgba(234, 179, 8, 0.3); color: #fde047; }
+        .heatmap-red { background: rgba(239, 68, 68, 0.3); color: #fca5a5; }
+        .heatmap-blue { background: rgba(59, 130, 246, 0.3); color: #93c5fd; }
+        .heatmap-zero { background: rgba(107, 114, 128, 0.5); color: #d1d5db; font-weight: bold; }
+        .heatmap-anomaly { background: rgba(168, 85, 247, 0.5); color: #e9d5ff; font-weight: bold; }
         #log { font-family: monospace; font-size: 11px; white-space: pre-wrap; }
     </style>
 </head>
@@ -69,17 +72,20 @@
                         <input id="matSearch" onkeyup="filterTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
                     </div>
                 </div>
-                <div class="overflow-auto max-h-[500px]"><table class="data-table w-full"><thead id="planHead"></thead><tbody id="planBody"><tr><td colspan="10" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+                <div class="overflow-auto max-h-[600px]"><table class="data-table w-full"><thead id="planHead"></thead><tbody id="planBody"><tr><td colspan="10" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
                 <p class="mt-2 text-sm text-slate-400">Rows: <span id="rowCount">0</span></p>
             </div>
         </div>
         <div id="capacity-tab" class="tab-content hidden">
             <div class="card rounded-xl p-6">
                 <h3 class="font-semibold mb-4">Machine Utilization Heatmap</h3>
-                <div class="flex gap-4 mb-4 text-sm">
-                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-green"></span> &lt;80%</span>
-                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-yellow"></span> 80-95%</span>
-                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-red"></span> &gt;95%</span>
+                <div class="flex flex-wrap gap-4 mb-4 text-sm">
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-zero"></span> 0% (Idle)</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-anomaly"></span> 1-5% (Anomaly)</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-blue"></span> 5-30% (Low)</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-green"></span> 30-80% (Normal)</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-yellow"></span> 80-95% (High)</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-red"></span> &gt;95% (Critical)</span>
                 </div>
                 <div class="overflow-auto"><table class="data-table w-full"><thead id="capHead"></thead><tbody id="capBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
             </div>
@@ -176,7 +182,8 @@ function loadPlanningData() {
     document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Family</th><th>Line Type</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
     document.getElementById('rowCount').textContent = items.length;
-    let html = items.slice(0, 500).map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td>${(item.product_family || '').substring(0, 12)}</td><td class="text-xs">${item.line_type}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
+    // Show ALL rows - removed the slice(0, 500) limit
+    let html = items.map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td>${(item.product_family || '').substring(0, 12)}</td><td class="text-xs">${item.line_type}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
     document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
 }
 function filterTable() { const s = document.getElementById('matSearch').value.toLowerCase(); document.querySelectorAll('#planBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; }); }
@@ -185,7 +192,17 @@ async function loadCapacityData() {
         const res = await fetch('/api/capacity'); const data = await res.json();
         const periods = data.periods.slice(0, 12);
         document.getElementById('capHead').innerHTML = `<tr class="text-slate-400"><th>Machine</th>${periods.map(p => `<th class="text-center">${p}</th>`).join('')}</tr>`;
-        let html = data.utilization.map(m => `<tr><td>${m.machine}</td>${periods.map(p => { const v = m.values[p] || 0; const cls = v > 95 ? 'heatmap-red' : v > 80 ? 'heatmap-yellow' : 'heatmap-green'; return `<td class="text-center ${cls}">${v.toFixed(0)}%</td>`; }).join('')}</tr>`).join('');
+        let html = data.utilization.map(m => `<tr><td>${m.machine}</td>${periods.map(p => { 
+            const v = m.values[p] || 0; 
+            let cls, txt;
+            if (v === 0) { cls = 'heatmap-zero'; txt = '0% ⚠'; }
+            else if (v > 0 && v < 5) { cls = 'heatmap-anomaly'; txt = v.toFixed(1) + '% ⚠'; }
+            else if (v < 30) { cls = 'heatmap-blue'; txt = v.toFixed(0) + '%'; }
+            else if (v > 95) { cls = 'heatmap-red'; txt = v.toFixed(0) + '%'; }
+            else if (v > 80) { cls = 'heatmap-yellow'; txt = v.toFixed(0) + '%'; }
+            else { cls = 'heatmap-green'; txt = v.toFixed(0) + '%'; }
+            return `<td class="text-center ${cls}">${txt}</td>`; 
+        }).join('')}</tr>`).join('');
         document.getElementById('capBody').innerHTML = html || '<tr><td>No data</td></tr>';
     } catch (err) { log('Error: ' + err); }
 }
