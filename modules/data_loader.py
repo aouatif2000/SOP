@@ -321,10 +321,10 @@ class DataLoader:
         print(f"  Routing: {sum(len(v) for v in self.routing.values())} items")
     
     def _load_forecasts(self):
-        """Load demand forecasts."""
+        """Load demand forecasts - including historical actuals for Aux column calculation."""
         df = pd.read_excel(self.excel_file, sheet_name='Forecast sheet')
         
-        # Find period columns
+        # Find ALL period columns (not just planning periods)
         period_columns = []
         for col in df.columns:
             col_str = str(col).strip()
@@ -334,8 +334,8 @@ class DataLoader:
                     year = parts[0]
                     month = parts[1].replace('M', '').zfill(2)
                     period_str = f"{year}-{month}"
-                    if period_str in self.periods:
-                        period_columns.append((col, period_str))
+                    # Load ALL periods, not just planning periods
+                    period_columns.append((col, period_str))
                 except:
                     pass
         

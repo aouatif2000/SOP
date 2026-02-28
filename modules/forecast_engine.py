@@ -2,8 +2,8 @@
 S&OP Planning Engine - Forecast Engine
 Calculates Line 01: Demand Forecast
 
-Aux Column 1: Average demand over actuals period (historical)
-Aux Column 2: Average demand over forecast period (future)
+Aux Column 1: Average demand over actuals period (HISTORICAL - before planning month)
+Aux Column 2: Average demand over forecast period (FUTURE - planning horizon)
 """
 
 from typing import Dict, List
@@ -18,14 +18,14 @@ class ForecastEngine:
     Logic: Copy forecast values from Forecast sheet for finished products.
     
     Aux Columns (from Procedure document):
-    - Aux 1: Average demand in last X months (actuals)
-    - Aux 2: Average demand over the forecast horizon
+    - Aux 1: Average demand over HISTORICAL actuals (months before planning)
+    - Aux 2: Average demand over FORECAST horizon (planning months)
     """
     
-    def __init__(self, data: DataLoader, months_actuals: int = 0, months_forecast: int = 12):
+    def __init__(self, data: DataLoader, months_actuals: int = 12, months_forecast: int = 12):
         self.data = data
-        self.periods = data.periods
-        self.months_actuals = months_actuals  # How many months of historical actuals
+        self.periods = data.periods  # Planning periods (e.g., 2025-12 to 2026-11)
+        self.months_actuals = months_actuals  # How many historical months to average
         self.months_forecast = months_forecast  # Planning horizon
         self.results: Dict[str, Dict[str, float]] = {}  # material -> {period: value}
         self.rows: List[PlanningRow] = []
@@ -38,12 +38,12 @@ class ForecastEngine:
         for mat_num, forecast_data in self.data.forecasts.items():
             material = self.data.materials.get(mat_num)
             
-            # Store in results
+            # Store in results (only planning periods)
             self.results[mat_num] = {}
             for period in self.periods:
                 self.results[mat_num][period] = forecast_data.get(period, 0.0)
             
-            # Calculate Aux columns
+            # Calculate Aux columns using ALL available data (including historical)
             aux_1, aux_2 = self._calculate_aux_columns(mat_num, forecast_data)
             
             # Create planning row
@@ -69,41 +69,48 @@ class ForecastEngine:
         """
         Calculate Aux 1 and Aux 2 for Line 01.
         
-        Aux 1: Average demand over actuals period (first X months in data)
-        Aux 2: Average demand over forecast period (remaining months)
+        Aux 1: SUM of historical actuals / months_actuals (always divide by fixed months)
+               Note: Excludes the month immediately before planning (may be partial)
+        Aux 2: Average demand over FORECAST (planning period months)
         
-        Returns: (aux_1, aux_2) as formatted strings or floats
+        Returns: (aux_1, aux_2) as formatted strings
         """
-        all_values = []
-        for period in self.periods:
-            val = forecast_data.get(period, 0.0)
-            all_values.append(val)
+        # Get the first planning period to determine cutoff
+        first_planning_period = min(self.periods) if self.periods else None
         
-        # Aux 1: Average of actuals (first months_actuals periods)
-        if self.months_actuals > 0 and len(all_values) >= self.months_actuals:
-            actuals_values = all_values[:self.months_actuals]
-            non_zero_actuals = [v for v in actuals_values if v > 0]
-            if non_zero_actuals:
-                aux_1 = round(sum(non_zero_actuals) / len(non_zero_actuals), 2)
-            else:
-                aux_1 = 0.0
-        else:
-            # If no actuals specified, use all non-zero values average
-            non_zero = [v for v in all_values if v > 0]
-            aux_1 = round(sum(non_zero) / len(non_zero), 2) if non_zero else 0.0
+        if not first_planning_period:
+            return "0", "0"
         
-        # Aux 2: Average of forecast (remaining months after actuals)
-        if self.months_actuals > 0 and len(all_values) > self.months_actuals:
-            forecast_values = all_values[self.months_actuals:]
-            non_zero_forecast = [v for v in forecast_values if v > 0]
-            if non_zero_forecast:
-                aux_2 = round(sum(non_zero_forecast) / len(non_zero_forecast), 2)
-            else:
-                aux_2 = 0.0
+        # Separate historical (before planning) from forecast (planning period)
+        historical_values = []
+        forecast_values = []
+        
+        for period, value in sorted(forecast_data.items()):
+            if period < first_planning_period:
+                # This is a historical period (before planning starts)
+                historical_values.append(value)
+            elif period in self.periods:
+                # This is a planning period
+                forecast_values.append(value)
+            # Periods after planning period but not in planning are ignored
+        
+        # Aux 1: SUM of historical / months_actuals (fixed divisor)
+        # Exclude the last historical month (immediately before planning - may be partial)
+        if historical_values and self.months_actuals > 0:
+            # Remove the last month (immediately before planning)
+            actuals_pool = historical_values[:-1] if len(historical_values) > 1 else historical_values
+            # Sum all available values, divide by months_actuals (fixed)
+            total = sum(actuals_pool)
+            aux_1 = round(total / self.months_actuals, 2)
         else:
-            # If no actuals, Aux 2 = average of all periods
-            non_zero = [v for v in all_values if v > 0]
-            aux_2 = round(sum(non_zero) / len(non_zero), 2) if non_zero else 0.0
+            aux_1 = 0.0
+        
+        # Aux 2: SUM of forecast / months_forecast (fixed divisor)
+        if forecast_values:
+            total = sum(forecast_values)
+            aux_2 = round(total / len(forecast_values), 2)  # Divide by actual count for forecast
+        else:
+            aux_2 = 0.0
         
         return str(aux_1), str(aux_2)
     
