@@ -1,314 +1,224 @@
 """
 S&OP Planning Engine - Inventory Engine
-Calculates:
-- Line 03: Total Demand
-- Line 04: Inventory
-- Line 05: Minimum Target Stock
-- Line 06: Production Plan / Purchase Receipt
-- Line 07: Purchase Plan
+Calculates per-material inventory planning for a SINGLE material at a time.
+
+Lines calculated:
+- Line 03: Total Demand  (forecast + dependent demand)
+- Line 04: Inventory     (running balance, CAN go negative)
+- Line 05: Minimum Target Stock  (safety_stock + strategic_stock)
+- Line 06: Production Plan / Purchase Receipt  (heuristic with ceiling)
+- Line 07: Purchase Plan (receipt shifted by lead time)
+
+CRITICAL LOGIC (verified against Excel VBA):
+- Production Plan: CEILING(need, BOM_header_quantity)  NOT lot_size!
+- Purchase Receipt: CEILING(need, lot_size_from_safety_stock)
+- For produced+purchased:
+    1. production_need = raw_need * production_fraction
+    2. production_plan = CEILING(production_need, BOM_header_qty) if > 0 else 0
+    3. purchase_need = raw_need - production_plan  (residual, NOT proportional)
+    4. purchase_receipt = CEILING(purchase_need, BOM_header_qty) if > 0 else 0
+- Inventory CAN go negative (backorder)
 """
 
-import numpy as np
-from typing import Dict, List, Tuple
-from modules.models import PlanningRow, LineType, ProductType
+import math
+from typing import Dict, List, Optional
+from modules.models import PlanningRow, LineType
 from modules.data_loader import DataLoader
 
 
+def ceiling_multiple(value: float, multiple: float) -> float:
+    """Excel-compatible CEILING(value, multiple)."""
+    if multiple <= 0 or value <= 0:
+        return 0.0
+    return math.ceil(value / multiple) * multiple
+
+
 class InventoryEngine:
-    """
-    Generates inventory-related planning lines.
-    
-    Calculation sequence:
-    1. Line 03: Total Demand = Forecast + Dependent Demand
-    2. Line 05: Target Stock from safety stock config
-    3. Line 06: Production/Purchase Plan based on need
-    4. Line 04: Inventory balance calculation
-    5. Line 07: Purchase Plan (timing)
-    """
-    
-    def __init__(
-        self, 
-        data: DataLoader,
-        forecast_data: Dict[str, Dict[str, float]],
-        dependent_demand: Dict[str, Dict[str, float]]
-    ):
+    """Calculates inventory-related lines for a single material."""
+
+    def __init__(self, data: DataLoader):
         self.data = data
         self.periods = data.periods
-        self.forecast_data = forecast_data
-        self.dependent_demand = dependent_demand
-        
-        # Results
-        self.total_demand: Dict[str, Dict[str, float]] = {}
-        self.target_stock: Dict[str, float] = {}
-        self.production_plan: Dict[str, Dict[str, float]] = {}
-        self.purchase_receipt: Dict[str, Dict[str, float]] = {}
-        self.purchase_plan: Dict[str, Dict[str, float]] = {}
-        self.inventory: Dict[str, Dict[str, float]] = {}
-        
-        # Planning rows
-        self.rows_03: List[PlanningRow] = []  # Total demand
-        self.rows_04: List[PlanningRow] = []  # Inventory
-        self.rows_05: List[PlanningRow] = []  # Target stock
-        self.rows_06_prod: List[PlanningRow] = []  # Production plan
-        self.rows_06_purch: List[PlanningRow] = []  # Purchase receipt
-        self.rows_07: List[PlanningRow] = []  # Purchase plan
-    
-    def calculate(self) -> Dict[str, List[PlanningRow]]:
-        """
-        Calculate all inventory-related lines.
-        Returns dict of line_type -> rows
-        """
-        self._calculate_total_demand()
-        self._calculate_target_stock()
-        self._calculate_production_purchase_plan()
-        self._calculate_inventory()
-        self._calculate_purchase_plan()
-        
-        return {
-            LineType.TOTAL_DEMAND.value: self.rows_03,
-            LineType.INVENTORY.value: self.rows_04,
-            LineType.MIN_TARGET_STOCK.value: self.rows_05,
-            LineType.PRODUCTION_PLAN.value: self.rows_06_prod,
-            LineType.PURCHASE_RECEIPT.value: self.rows_06_purch,
-            LineType.PURCHASE_PLAN.value: self.rows_07,
-        }
-    
-    def _calculate_total_demand(self):
-        """Line 03: Total Demand = Forecast + Dependent Demand"""
-        print("  [03] Calculating Total Demand...")
-        
-        # Get all materials with any demand
-        all_materials = set(self.forecast_data.keys()) | set(self.dependent_demand.keys())
-        
-        for mat_num in all_materials:
-            forecast = self.forecast_data.get(mat_num, {})
-            dependent = self.dependent_demand.get(mat_num, {})
-            
-            self.total_demand[mat_num] = {}
-            for period in self.periods:
-                total = forecast.get(period, 0.0) + dependent.get(period, 0.0)
-                self.total_demand[mat_num][period] = total
-            
-            # Only create row if there's actual demand
-            if any(v > 0 for v in self.total_demand[mat_num].values()):
-                material = self.data.materials.get(mat_num)
-                row = PlanningRow(
-                    material_number=mat_num,
-                    material_name=material.name if material else '',
-                    product_type=material.product_type.value if material else '',
-                    product_family=material.product_family if material else '',
-                    spc_product=material.spc_product if material else '',
-                    product_cluster=material.product_cluster if material else '',
-                    product_name=material.product_name if material else '',
-                    line_type=LineType.TOTAL_DEMAND.value,
-                    values=self.total_demand[mat_num].copy()
-                )
-                self.rows_03.append(row)
-        
-        print(f"       → {len(self.rows_03)} materials with total demand")
-    
-    def _calculate_target_stock(self):
-        """Line 05: Minimum Target Stock from safety stock config"""
-        print("  [05] Setting Minimum Target Stock...")
-        
-        # Get materials that have demand or are in safety stock config
-        materials_to_process = set(self.total_demand.keys()) | set(self.data.safety_stock.keys())
-        
-        for mat_num in materials_to_process:
-            ss_config = self.data.safety_stock.get(mat_num)
-            
-            if ss_config:
-                # Use target stock if set, otherwise safety stock
-                target = ss_config.target_stock if ss_config.target_stock > 0 else ss_config.safety_stock
-            else:
-                target = 0.0
-            
-            self.target_stock[mat_num] = target
-            
-            # Create row
-            material = self.data.materials.get(mat_num)
-            if material:
-                row = PlanningRow(
-                    material_number=mat_num,
-                    material_name=material.name,
-                    product_type=material.product_type.value,
-                    product_family=material.product_family,
-                    spc_product=material.spc_product or '',
-                    product_cluster=material.product_cluster or '',
-                    product_name=material.product_name or '',
-                    line_type=LineType.MIN_TARGET_STOCK.value,
-                    values={p: target for p in self.periods}
-                )
-                self.rows_05.append(row)
-        
-        print(f"       → {len(self.rows_05)} materials with target stock")
-    
-    def _calculate_production_purchase_plan(self):
-        """
-        Line 06: Production Plan / Purchase Receipt
-        
-        Logic:
-        - If projected inventory falls below target, plan to replenish
-        - Produced materials -> Production Plan
-        - Purchased materials -> Purchase Receipt
-        - Round up to lot size
-        """
-        print("  [06] Calculating Production/Purchase Plan...")
-        
-        for mat_num in self.total_demand:
-            material = self.data.materials.get(mat_num)
-            if not material:
-                continue
-            
-            # Determine if produced or purchased
-            is_purchased = material.is_purchased
-            
-            # Get parameters
-            initial_stock = self.data.stock_levels.get(mat_num, 0.0)
-            target = self.target_stock.get(mat_num, 0.0)
-            ss_config = self.data.safety_stock.get(mat_num)
-            lot_size = ss_config.lot_size if ss_config else 1.0
-            if lot_size <= 0:
-                lot_size = 1.0
-            
-            # Calculate plan
-            plan_data = {}
-            running_stock = initial_stock
-            
-            for period in self.periods:
-                demand = self.total_demand[mat_num].get(period, 0.0)
-                projected_stock = running_stock - demand
-                
-                # Check if we need to replenish
-                if projected_stock < target:
-                    needed = target - projected_stock
-                    # Round up to lot size
-                    if lot_size > 1:
-                        needed = np.ceil(needed / lot_size) * lot_size
-                    plan_qty = max(0, needed)
+
+    def calculate_for_material(
+        self,
+        mat_num: str,
+        forecast: Dict[str, float],
+        dependent_demand_agg: Dict[str, float],
+        dependent_demand_by_parent: Dict[str, Dict[str, float]],
+    ) -> Dict:
+        material = self.data.materials.get(mat_num)
+        if not material:
+            return {'total_demand': {}, 'target_stock_value': 0, 'production_plan': None,
+                    'purchase_receipt': None, 'purchase_plan': None, 'inventory': {}, 'rows': []}
+
+        rows: List[PlanningRow] = []
+
+        # === LINE 03: Total Demand = Forecast + Dependent Demand ===
+        total_demand = {}
+        for period in self.periods:
+            total_demand[period] = forecast.get(period, 0.0) + dependent_demand_agg.get(period, 0.0)
+
+        rows.append(self._make_row(mat_num, material, LineType.TOTAL_DEMAND.value,
+                                   values=total_demand))
+
+        # === LINE 05: Minimum Target Stock = safety_stock + strategic_stock ===
+        ss_config = self.data.safety_stock.get(mat_num)
+        target_value = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
+
+        demand_values = [total_demand.get(p, 0.0) for p in self.periods]
+        avg_demand = sum(demand_values) / len(demand_values) if demand_values else 0.0
+        coverage = target_value / avg_demand if avg_demand > 0 else 0.0
+
+        target_stock_data = {p: target_value for p in self.periods}
+        rows.append(self._make_row(
+            mat_num, material, LineType.MIN_TARGET_STOCK.value,
+            aux_column=str(target_value) if target_value else None,
+            aux_2_column=str(coverage) if coverage else None,
+            values=target_stock_data,
+        ))
+
+        # === DETERMINE: Produced, Purchased, or Both ===
+        is_purchased_and_produced = self.data.is_purchased_and_produced(mat_num)
+        production_fraction_config = self.data.get_purchase_fraction(mat_num)
+
+        # BOM header quantity = ceiling multiple for production plan
+        bom_header_qty = self.data.get_production_ceiling(mat_num)
+        lot_size = ss_config.lot_size if ss_config else 1.0
+        if lot_size <= 0:
+            lot_size = 1.0
+
+        # Purchase receipt ceiling multiple
+        in_purchase_sheet = mat_num in self.data.purchase_sheet_materials
+        purch_ceil_multiple = lot_size if in_purchase_sheet else 1.0
+
+        has_routing = len(self.data.get_all_routings(mat_num)) > 0
+        is_bom_parent = any(b.parent_material == mat_num for b in self.data.bom if not b.is_coproduct)
+
+        if is_purchased_and_produced:
+            needs_production = True
+            needs_purchase = True
+        elif is_bom_parent and has_routing:
+            needs_production = True
+            needs_purchase = False
+        else:
+            needs_production = False
+            needs_purchase = True
+
+        # === Parameters ===
+        initial_stock = self.data.stock_levels.get(mat_num, 0.0)
+        lead_time = self.data.get_lead_time(mat_num) if needs_purchase else 0
+
+        # === LINE 06: Production Plan and/or Purchase Receipt ===
+        production_plan = {p: 0.0 for p in self.periods} if needs_production else None
+        purchase_receipt = {p: 0.0 for p in self.periods} if needs_purchase else None
+
+        running_stock = initial_stock
+
+        for i, period in enumerate(self.periods):
+            demand = total_demand.get(period, 0.0)
+            raw_need = target_value - running_stock + demand
+
+            prod_qty = 0.0
+            purch_qty = 0.0
+
+            if is_purchased_and_produced:
+                if raw_need > 0:
+                    prod_need = raw_need * production_fraction_config
+                    if prod_need > 0:
+                        prod_qty = ceiling_multiple(prod_need, bom_header_qty)
+                    purch_need = raw_need - prod_qty
+                    if purch_need > 0 and i >= lead_time:
+                        purch_qty = ceiling_multiple(purch_need, bom_header_qty)
+
+            elif needs_production:
+                if raw_need > 0:
+                    prod_qty = ceiling_multiple(raw_need, bom_header_qty)
+
+            elif needs_purchase:
+                if raw_need > 0 and i >= lead_time:
+                    purch_qty = ceiling_multiple(raw_need, purch_ceil_multiple)
+
+            if production_plan is not None:
+                production_plan[period] = prod_qty
+            if purchase_receipt is not None:
+                purchase_receipt[period] = purch_qty
+
+            running_stock = running_stock - demand + prod_qty + purch_qty
+
+        # === Create Line 06 rows ===
+        if production_plan is not None:
+            prod_aux1 = str(int(bom_header_qty)) if bom_header_qty == int(bom_header_qty) else str(bom_header_qty)
+            prod_aux2 = str(production_fraction_config) if is_purchased_and_produced else None
+            rows.append(self._make_row(
+                mat_num, material, LineType.PRODUCTION_PLAN.value,
+                aux_column=prod_aux1, aux_2_column=prod_aux2,
+                values=production_plan,
+            ))
+
+        if purchase_receipt is not None:
+            purch_ceil_val = bom_header_qty if is_purchased_and_produced else purch_ceil_multiple
+            purch_aux1 = str(int(purch_ceil_val)) if purch_ceil_val == int(purch_ceil_val) else str(purch_ceil_val)
+            rows.append(self._make_row(
+                mat_num, material, LineType.PURCHASE_RECEIPT.value,
+                aux_column=purch_aux1, values=purchase_receipt,
+            ))
+
+        # === LINE 04: Inventory ===
+        inventory = {}
+        running_stock = initial_stock
+        for period in self.periods:
+            demand = total_demand.get(period, 0.0)
+            prod = production_plan.get(period, 0.0) if production_plan else 0.0
+            purch = purchase_receipt.get(period, 0.0) if purchase_receipt else 0.0
+            running_stock = running_stock - demand + prod + purch
+            inventory[period] = running_stock
+
+        rows.append(self._make_row(
+            mat_num, material, LineType.INVENTORY.value,
+            starting_stock=initial_stock, values=inventory,
+        ))
+
+        # === LINE 07: Purchase Plan = Purchase Receipt shifted by lead_time ===
+        purchase_plan = None
+        if purchase_receipt is not None:
+            purchase_plan = {}
+            for i, period in enumerate(self.periods):
+                future_idx = i + lead_time
+                if future_idx < len(self.periods):
+                    purchase_plan[period] = purchase_receipt.get(self.periods[future_idx], 0.0)
                 else:
-                    plan_qty = 0.0
-                
-                plan_data[period] = plan_qty
-                running_stock = projected_stock + plan_qty
-            
-            # Store in appropriate dict
-            if is_purchased:
-                self.purchase_receipt[mat_num] = plan_data
-            else:
-                self.production_plan[mat_num] = plan_data
-            
-            # Create row
-            line_type = LineType.PURCHASE_RECEIPT if is_purchased else LineType.PRODUCTION_PLAN
-            row = PlanningRow(
-                material_number=mat_num,
-                material_name=material.name,
-                product_type=material.product_type.value,
-                product_family=material.product_family,
-                spc_product=material.spc_product or '',
-                product_cluster=material.product_cluster or '',
-                product_name=material.product_name or '',
-                line_type=line_type.value,
-                starting_stock=initial_stock,
-                values=plan_data.copy()
-            )
-            
-            if is_purchased:
-                self.rows_06_purch.append(row)
-            else:
-                self.rows_06_prod.append(row)
-        
-        print(f"       → {len(self.rows_06_prod)} production plans, {len(self.rows_06_purch)} purchase receipts")
-    
-    def _calculate_inventory(self):
-        """
-        Line 04: Inventory Balance
-        
-        Formula: Inventory[t] = Inventory[t-1] - Demand[t] + Production[t] + Purchase[t]
-        """
-        print("  [04] Calculating Inventory Balance...")
-        
-        for mat_num in self.total_demand:
-            material = self.data.materials.get(mat_num)
-            initial_stock = self.data.stock_levels.get(mat_num, 0.0)
-            
-            self.inventory[mat_num] = {}
-            running_stock = initial_stock
-            
-            for period in self.periods:
-                demand = self.total_demand[mat_num].get(period, 0.0)
-                production = self.production_plan.get(mat_num, {}).get(period, 0.0)
-                purchase = self.purchase_receipt.get(mat_num, {}).get(period, 0.0)
-                
-                running_stock = max(0, running_stock - demand + production + purchase)
-                self.inventory[mat_num][period] = running_stock
-            
-            # Create row
-            if material:
-                row = PlanningRow(
-                    material_number=mat_num,
-                    material_name=material.name,
-                    product_type=material.product_type.value,
-                    product_family=material.product_family,
-                    spc_product=material.spc_product or '',
-                    product_cluster=material.product_cluster or '',
-                    product_name=material.product_name or '',
-                    line_type=LineType.INVENTORY.value,
-                    starting_stock=initial_stock,
-                    values=self.inventory[mat_num].copy()
-                )
-                self.rows_04.append(row)
-        
-        print(f"       → {len(self.rows_04)} materials with inventory")
-    
-    def _calculate_purchase_plan(self):
-        """
-        Line 07: Purchase Plan
-        
-        Purchase plan with lead time considerations.
-        Aux column indicates the order sequence.
-        """
-        print("  [07] Calculating Purchase Plan...")
-        
-        order_num = 1
-        for mat_num, receipt_data in self.purchase_receipt.items():
-            material = self.data.materials.get(mat_num)
-            if not material:
-                continue
-            
-            # Check if there are any purchases planned
-            if not any(v > 0 for v in receipt_data.values()):
-                continue
-            
-            plan_data = {}
-            for period in self.periods:
-                # For simplicity, purchase plan = purchase receipt (same timing)
-                plan_data[period] = receipt_data.get(period, 0.0)
-            
-            self.purchase_plan[mat_num] = plan_data
-            
-            # Create row
-            row = PlanningRow(
-                material_number=mat_num,
-                material_name=material.name,
-                product_type=material.product_type.value,
-                product_family=material.product_family,
-                spc_product=material.spc_product or '',
-                product_cluster=material.product_cluster or '',
-                product_name=material.product_name or '',
-                line_type=LineType.PURCHASE_PLAN.value,
-                aux_column=str(order_num),
-                values=plan_data.copy()
-            )
-            self.rows_07.append(row)
-            order_num += 1
-        
-        print(f"       → {len(self.rows_07)} purchase plans")
-    
-    def get_production_plan(self) -> Dict[str, Dict[str, float]]:
-        """Get all production plans."""
-        return self.production_plan
-    
-    def get_total_demand(self) -> Dict[str, Dict[str, float]]:
-        """Get all total demand data."""
-        return self.total_demand
+                    purchase_plan[period] = 0.0
+
+            pp_aux = "False" if lead_time == 0 else str(lead_time)
+            rows.append(self._make_row(
+                mat_num, material, LineType.PURCHASE_PLAN.value,
+                aux_column=pp_aux, values=purchase_plan,
+            ))
+
+        return {
+            'total_demand': total_demand,
+            'target_stock_value': target_value,
+            'production_plan': production_plan,
+            'purchase_receipt': purchase_receipt,
+            'purchase_plan': purchase_plan,
+            'inventory': inventory,
+            'rows': rows,
+        }
+
+    def _make_row(self, mat_num, material, line_type,
+                  aux_column=None, aux_2_column=None, starting_stock=0.0, values=None):
+        return PlanningRow(
+            material_number=mat_num,
+            material_name=material.name,
+            product_type=material.product_type.value,
+            product_family=material.product_family,
+            spc_product=material.spc_product or '',
+            product_cluster=material.product_cluster or '',
+            product_name=material.product_name or '',
+            line_type=line_type,
+            aux_column=aux_column,
+            aux_2_column=aux_2_column,
+            starting_stock=starting_stock,
+            values=dict(values) if values else {},
+        )

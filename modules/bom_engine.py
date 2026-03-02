@@ -1,86 +1,70 @@
 """
 S&OP Planning Engine - BOM Engine
-Calculates Line 02: Dependent Demand (BOM Explosion)
-Calculates Line 08: Dependent Requirements (Detail)
+BOM level management and dependent demand/requirements calculation.
 """
 
 from typing import Dict, List, Set, Tuple
+from collections import defaultdict
 from modules.models import PlanningRow, LineType
 from modules.data_loader import DataLoader
 
 
 class BOMEngine:
     """
-    Generates:
-    - Line 02: Dependent Demand (aggregated)
-    - Line 08: Dependent Requirements (detailed by parent)
-    
-    Logic: BOM Explosion
-    For each parent material with demand, calculate child component requirements.
-    Formula: Child_Demand = Parent_Demand × BOM_Quantity_Per
+    Manages BOM structure and creates dependent demand/requirements rows.
+    Does NOT do the full BOM explosion itself - that's done level-by-level
+    in the PlanningEngine orchestrator.
     """
-    
-    def __init__(self, data: DataLoader, forecast_data: Dict[str, Dict[str, float]]):
+
+    def __init__(self, data: DataLoader):
         self.data = data
         self.periods = data.periods
-        self.forecast_data = forecast_data
-        
-        # Results
-        self.dependent_demand: Dict[str, Dict[str, float]] = {}  # child -> {period: total}
-        self.dependent_details: Dict[str, Dict[str, Dict[str, float]]] = {}  # child -> {parent -> {period: qty}}
-        
-        self.rows_02: List[PlanningRow] = []  # Line 02
-        self.rows_08: List[PlanningRow] = []  # Line 08
-    
-    def calculate(self) -> Tuple[List[PlanningRow], List[PlanningRow]]:
+        # Parent -> list of (child, qty_per) from BOM
+        self.parent_children: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        for b in data.bom:
+            if not b.is_coproduct:
+                self.parent_children[b.parent_material].append(
+                    (b.component_material, b.quantity_per)
+                )
+
+    def get_max_level(self) -> int:
+        return self.data.get_max_bom_level()
+
+    def get_materials_at_level(self, level: int) -> List[str]:
+        return self.data.get_materials_at_level(level)
+
+    def compute_dependent_requirements(
+        self, parent_mat: str, production_plan: Dict[str, float]
+    ) -> Dict[str, Dict[str, float]]:
         """
-        Perform BOM explosion to calculate dependent demand.
-        Returns (Line 02 rows, Line 08 rows)
+        For a parent with a production plan, compute what each child needs.
+        Returns: {child_mat -> {period -> qty}}
         """
-        print("  [02] Calculating Dependent Demand (BOM Explosion)...")
-        
-        # Initialize dependent demand for all materials
-        for mat_num in self.data.materials:
-            self.dependent_demand[mat_num] = {p: 0.0 for p in self.periods}
-        
-        # Process each BOM relationship
-        for bom_item in self.data.bom:
-            if bom_item.is_coproduct:
-                continue
-            
-            parent = bom_item.parent_material
-            child = bom_item.component_material
-            qty_per = bom_item.quantity_per
-            
-            # Get parent's demand (from forecast)
-            parent_demand = self.forecast_data.get(parent, {})
-            
+        result: Dict[str, Dict[str, float]] = {}
+        children = self.parent_children.get(parent_mat, [])
+        for child, qty_per in children:
+            child_demand = {}
             for period in self.periods:
-                parent_qty = parent_demand.get(period, 0.0)
-                if parent_qty > 0:
-                    child_qty = parent_qty * qty_per
-                    
-                    # Initialize if needed
-                    if child not in self.dependent_demand:
-                        self.dependent_demand[child] = {p: 0.0 for p in self.periods}
-                    
-                    # Add to aggregated demand
-                    self.dependent_demand[child][period] += child_qty
-                    
-                    # Track details for Line 08
-                    if child not in self.dependent_details:
-                        self.dependent_details[child] = {}
-                    if parent not in self.dependent_details[child]:
-                        self.dependent_details[child][parent] = {p: 0.0 for p in self.periods}
-                    self.dependent_details[child][parent][period] += child_qty
-        
-        # Generate Line 02 rows (aggregated dependent demand)
-        for mat_num, demand_data in self.dependent_demand.items():
-            if any(v > 0 for v in demand_data.values()):
-                material = self.data.materials.get(mat_num)
-                
-                row = PlanningRow(
-                    material_number=mat_num,
+                parent_qty = production_plan.get(period, 0.0)
+                child_demand[period] = parent_qty * qty_per
+            result[child] = child_demand
+        return result
+
+    def create_dependent_demand_rows(
+        self, child_mat: str, demand_by_parent: Dict[str, Dict[str, float]]
+    ) -> List[PlanningRow]:
+        """
+        Create Line 02 rows for a child material.
+        One row per parent that contributes demand.
+        Aux column = parent material number.
+        """
+        rows = []
+        material = self.data.materials.get(child_mat)
+
+        for parent_mat, period_data in demand_by_parent.items():
+            # Generate row even if all zeros (Excel does this)
+            rows.append(PlanningRow(
+                    material_number=child_mat,
                     material_name=material.name if material else '',
                     product_type=material.product_type.value if material else '',
                     product_family=material.product_family if material else '',
@@ -88,42 +72,57 @@ class BOMEngine:
                     product_cluster=material.product_cluster if material else '',
                     product_name=material.product_name if material else '',
                     line_type=LineType.DEPENDENT_DEMAND.value,
-                    values=demand_data.copy()
-                )
-                self.rows_02.append(row)
+                    aux_column=parent_mat,
+                    values=dict(period_data)
+                ))
+        return rows
+
+    def create_dependent_requirements_rows(
+        self, parent_mat: str, children_demand: Dict[str, Dict[str, float]]
+    ) -> List[PlanningRow]:
+        """
+        Create Line 08 rows for children of a parent.
+        One row per child. Aux column = child material, aux2 = qty_per.
+        Material number = parent material.
         
-        print(f"       → {len(self.rows_02)} materials with dependent demand")
+        WAIT - checking Excel: Line 08 rows have:
+        - Material number = CHILD material
+        - Aux column = component material number (e.g., 150000485)
+        - Aux 2 = qty_per (e.g., 1.124)
         
-        # Generate Line 08 rows (detailed requirements)
-        print("  [08] Generating Dependent Requirements (Detail)...")
+        Actually looking more carefully at Excel reference:
+        Material 600003822 has Line 08 with:
+          material_number=600003822, aux=150000485, aux2=1.124
         
-        for child, parent_data in self.dependent_details.items():
-            child_material = self.data.materials.get(child)
-            
-            for parent, period_data in parent_data.items():
-                if any(v > 0 for v in period_data.values()):
-                    row = PlanningRow(
-                        material_number=child,
-                        material_name=child_material.name if child_material else '',
-                        product_type=child_material.product_type.value if child_material else '',
-                        product_family=child_material.product_family if child_material else '',
-                        spc_product=child_material.spc_product if child_material else '',
-                        product_cluster=child_material.product_cluster if child_material else '',
-                        product_name=child_material.product_name if child_material else '',
-                        line_type=LineType.DEPENDENT_REQUIREMENTS.value,
-                        aux_column=parent,  # Store parent material number
-                        values=period_data.copy()
-                    )
-                    self.rows_08.append(row)
-        
-        print(f"       → {len(self.rows_08)} detailed requirements")
-        
-        return self.rows_02, self.rows_08
-    
-    def get_dependent_demand(self, material: str, period: str) -> float:
-        """Get dependent demand for a material and period."""
-        return self.dependent_demand.get(material, {}).get(period, 0.0)
-    
+        So: material_number = PARENT, aux = CHILD (component), aux2 = qty_per
+        """
+        rows = []
+        parent_material = self.data.materials.get(parent_mat)
+
+        for child_mat, period_data in children_demand.items():
+            # Generate row even if all zeros (Excel does this)
+            # Find qty_per for this child from BOM
+            qty_per = None
+            for b in self.data.bom:
+                if b.parent_material == parent_mat and b.component_material == child_mat and not b.is_coproduct:
+                    qty_per = b.quantity_per
+                    break
+
+            rows.append(PlanningRow(
+                    material_number=parent_mat,
+                    material_name=parent_material.name if parent_material else '',
+                    product_type=parent_material.product_type.value if parent_material else '',
+                    product_family=parent_material.product_family if parent_material else '',
+                    spc_product=parent_material.spc_product if parent_material else '',
+                    product_cluster=parent_material.product_cluster if parent_material else '',
+                    product_name=parent_material.product_name if parent_material else '',
+                    line_type=LineType.DEPENDENT_REQUIREMENTS.value,
+                    aux_column=child_mat,
+                    aux_2_column=str(qty_per) if qty_per is not None else None,
+                    values=dict(period_data)
+                ))
+        return rows
+
     def get_all_dependent_demand(self) -> Dict[str, Dict[str, float]]:
-        """Get all dependent demand data."""
-        return self.dependent_demand
+        """Not used in level-by-level approach."""
+        return {}

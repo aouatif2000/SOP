@@ -6,8 +6,9 @@ Reads ONLY raw input sheets (not the Planning sheet).
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 from pathlib import Path
+from collections import defaultdict
 
 from modules.models import (
     Material, BOMItem, RoutingItem, Machine, MachineGroup,
@@ -16,39 +17,37 @@ from modules.models import (
 
 
 class DataLoader:
-    """
-    Loads raw input data from Excel.
-    Does NOT read Planning sheet - calculations are done in Python.
-    """
-    
     def __init__(self, file_path: str):
         self.file_path = Path(file_path)
         if not self.file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
-        
         self.excel_file = pd.ExcelFile(file_path)
-        
-        # Data containers
+
         self.config: Optional[PlanningConfig] = None
         self.materials: Dict[str, Material] = {}
         self.bom: List[BOMItem] = []
-        self.routing: Dict[str, List[RoutingItem]] = {}  # material -> list of routings
+        self.routing: Dict[str, List[RoutingItem]] = {}
         self.machines: Dict[str, Machine] = {}
         self.machine_groups: Dict[str, MachineGroup] = {}
         self.forecasts: Dict[str, Dict[str, float]] = {}
         self.stock_levels: Dict[str, float] = {}
         self.safety_stock: Dict[str, SafetyStockConfig] = {}
         self.periods: List[str] = []
-        
-        # FTE configuration
+
         self.fte_hours_per_year: float = 1492
         self.shift_hours: Dict[str, float] = {}
-        
+        self.purchase_lead_times: Dict[str, int] = {}
+        self.purchase_sheet_materials: Set[str] = set()
+        self.purchased_and_produced: Dict[str, float] = {}
+        self.bom_levels: Dict[str, int] = {}
+        self.avg_sales_price: Dict[str, float] = {}
+        self.cost_raw_material: Dict[str, float] = {}
+        self.cost_machine_hour: Dict[str, float] = {}
+        self.valuation_params: Dict[str, float] = {}
+
     def load_all(self) -> 'DataLoader':
-        """Load all raw input data."""
         print(f"Loading raw data from: {self.file_path.name}")
         print("-" * 60)
-        
         self._load_config()
         self._load_fte_config()
         self._load_materials()
@@ -58,82 +57,75 @@ class DataLoader:
         self._load_forecasts()
         self._load_stock_levels()
         self._load_safety_stock()
-        
+        self._load_purchase_sheet()
+        self._calculate_bom_levels()
+        self._load_avg_sales_price()
+        self._load_cost_raw_material()
+        self._load_cost_machine_hour()
+        self._load_valuation_params()
         print("-" * 60)
-        print(f"Raw data loaded successfully:")
-        print(f"  Materials: {len(self.materials)}")
-        print(f"  BOM items: {len(self.bom)}")
-        print(f"  Routings: {sum(len(v) for v in self.routing.values())}")
-        print(f"  Machines: {len(self.machines)}")
-        print(f"  Machine groups: {len(self.machine_groups)}")
-        print(f"  Forecasts: {len(self.forecasts)}")
-        print(f"  Stock levels: {len(self.stock_levels)}")
-        print(f"  Safety stock: {len(self.safety_stock)}")
-        print(f"  Periods: {len(self.periods)}")
-        
+        print(f"  Materials: {len(self.materials)}, BOM: {len(self.bom)}, Routings: {sum(len(v) for v in self.routing.values())}")
+        print(f"  Machines: {len(self.machines)}, Groups: {len(self.machine_groups)}")
+        print(f"  Forecasts: {len(self.forecasts)}, Stock: {len(self.stock_levels)}, Safety: {len(self.safety_stock)}")
+        ml = max(self.bom_levels.values()) if self.bom_levels else 0
+        print(f"  BOM levels: {ml+1} (0..{ml})")
         return self
-    
-    def _safe_float(self, value, default: float = 0.0) -> float:
-        """Safely convert value to float."""
+
+    def _safe_float(self, value, default=0.0):
         if pd.isna(value):
             return default
         try:
             return float(value)
         except (ValueError, TypeError):
             return default
-    
+
     def _load_config(self):
-        """Load planning configuration."""
         try:
             df = pd.read_excel(self.excel_file, sheet_name='Config')
-            
             initial_date = datetime(2025, 12, 1)
             forecast_months = 12
             site = "NLX1"
             unlimited_machine = "PBA99"
-            
-            # Get initial date from column header
+
             for col in df.columns:
                 if isinstance(col, datetime):
                     initial_date = col
                     break
-            
-            # Read parameters
+
             for _, row in df.iterrows():
                 param = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
                 value = row.iloc[1] if len(row) > 1 and pd.notna(row.iloc[1]) else None
-                
                 if param == "ForecastMonths" and value:
                     forecast_months = int(value)
                 elif param == "Site" and value:
                     site = str(value)
                 elif param == "MachineUnlimitedCapacity" and value:
                     unlimited_machine = str(value)
-            
+                elif param == "PurchasedAndProducedMaterials" and value:
+                    for entry in str(value).split(';'):
+                        parts = entry.strip().split(':')
+                        if len(parts) == 2:
+                            self.purchased_and_produced[parts[0].strip()] = float(parts[1].strip())
+
             self.config = PlanningConfig(
-                initial_date=initial_date,
-                forecast_months=forecast_months,
-                site=site,
-                unlimited_capacity_machine=unlimited_machine
+                initial_date=initial_date, forecast_months=forecast_months,
+                site=site, unlimited_capacity_machine=unlimited_machine
             )
             self.periods = self.config.get_periods()
-            
-            print(f"  Config: {forecast_months} months from {initial_date.strftime('%Y-%m')}")
-            
+            print(f"  Config: {forecast_months}mo from {initial_date.strftime('%Y-%m')}, site={site}")
+            if self.purchased_and_produced:
+                print(f"  PurchasedAndProduced: {self.purchased_and_produced}")
         except Exception as e:
             print(f"  Config warning: {e}")
             self.config = PlanningConfig(initial_date=datetime(2025, 12, 1))
             self.periods = self.config.get_periods()
-    
+
     def _load_fte_config(self):
-        """Load FTE and shift configuration."""
         try:
             df = pd.read_excel(self.excel_file, sheet_name='FTE sheet')
-            
             for _, row in df.iterrows():
                 type_val = str(row.get('Type', '')).strip()
                 hours = row.get('Hours per year')
-                
                 if pd.notna(hours):
                     if type_val == 'FTE':
                         self.fte_hours_per_year = float(hours)
@@ -143,30 +135,21 @@ class DataLoader:
                         self.shift_hours['3-shift system'] = float(hours) / 12
                     elif '24/7' in type_val.lower():
                         self.shift_hours['24/7 production'] = float(hours) / 12
-            
-            # Set defaults if not found
             if '3-shift system' not in self.shift_hours:
                 self.shift_hours['3-shift system'] = 520
-            
             print(f"  FTE config: {self.fte_hours_per_year} hours/year")
-            
         except Exception as e:
             print(f"  FTE config warning: {e}")
             self.shift_hours = {'3-shift system': 520}
-    
+
     def _load_materials(self):
-        """Load material master data."""
         df = pd.read_excel(self.excel_file, sheet_name='Material master')
-        
         for _, row in df.iterrows():
             mat_num = str(row.get('Material number (SKU)', '')).strip()
             if not mat_num or mat_num == 'nan':
                 continue
-            
             product_type_str = str(row.get(
-                'Product type (packaged material/bulk material/raw material/packaging goods/other)', ''
-            ))
-            
+                'Product type (packaged material/bulk material/raw material/packaging goods/other)', ''))
             self.materials[mat_num] = Material(
                 material_number=mat_num,
                 name=str(row.get('Material name (SKU)', '')),
@@ -187,222 +170,283 @@ class DataLoader:
                 default_inventory_value=self._safe_float(row.get('Default inventory value', 0)),
                 is_active=row.get('Active', 1) == 1
             )
-        
         print(f"  Materials: {len(self.materials)}")
-    
+
     def _load_bom(self):
-        """Load Bill of Materials."""
         df = pd.read_excel(self.excel_file, sheet_name='BOM')
-        
         for _, row in df.iterrows():
             parent = str(row.get('Material', '')).strip()
             component = str(row.get('Component', '')).strip()
-            
             if not parent or not component or parent == 'nan' or component == 'nan':
                 continue
-            
             qty = row.get('BILLOFMATERIALITEMQUANTITY', 0)
             if pd.isna(qty) or qty == 0:
                 continue
-            
             header_qty = row.get('BOM Header Quantity in Base UoM', 1)
             if pd.isna(header_qty) or header_qty == 0:
                 header_qty = 1
-            
-            # Quantity per unit of parent
             qty_per = float(qty) / float(header_qty)
             is_coproduct = row.get('Co-product', '') == 'X' or float(qty) < 0
-            
             self.bom.append(BOMItem(
                 plant=str(row.get('Plant', '')),
-                parent_material=parent,
-                parent_name=str(row.get('Material Name', '')),
-                component_material=component,
-                component_name=str(row.get('Component Description', '')),
-                quantity_per=abs(qty_per),
-                bom_header_quantity=float(header_qty),
+                parent_material=parent, parent_name=str(row.get('Material Name', '')),
+                component_material=component, component_name=str(row.get('Component Description', '')),
+                quantity_per=abs(qty_per), bom_header_quantity=float(header_qty),
                 is_coproduct=is_coproduct,
                 production_version=str(row.get('PV', '')) if pd.notna(row.get('PV')) else None
             ))
-        
         print(f"  BOM: {len(self.bom)} items")
-    
+
     def _load_machines(self):
-        """Load machines and create machine groups."""
         df = pd.read_excel(self.excel_file, sheet_name='OEE + Machine groups')
-        
-        # Find period columns
         period_columns = []
         for col in df.columns:
             if isinstance(col, datetime):
-                period_str = col.strftime('%Y-%m')
-                if period_str in self.periods:
-                    period_columns.append((col, period_str))
-        
-        # Track machine groups
+                ps = col.strftime('%Y-%m')
+                if ps in self.periods:
+                    period_columns.append((col, ps))
         groups: Dict[str, List[str]] = {}
-        
         for _, row in df.iterrows():
-            machine_code = str(row.get('Machine code', '')).strip()
-            if not machine_code or machine_code == 'nan':
+            mc = str(row.get('Machine code', '')).strip()
+            if not mc or mc == 'nan':
                 continue
-            
-            # Get availability by period
-            availability = {}
-            for col, period_str in period_columns:
+            avail = {}
+            for col, ps in period_columns:
                 val = row.get(col)
-                availability[period_str] = float(val) if pd.notna(val) else 1.0
-            
+                avail[ps] = float(val) if pd.notna(val) else 1.0
             oee = float(row.get('OEE (%)', 0.8))
             if oee > 1:
                 oee = oee / 100
-            
-            machine_group = str(row.get('Machine group', '')) if pd.notna(row.get('Machine group')) else None
-            
-            # Determine shift system (default 3-shift)
-            shift_system = ShiftSystem.THREE_SHIFT
-            if machine_code == self.config.unlimited_capacity_machine:
-                shift_system = ShiftSystem.UNLIMITED
-            
-            self.machines[machine_code] = Machine(
-                machine_id=str(row.get('MachineID', machine_code)),
-                machine_code=machine_code,
-                name=str(row.get('Machine name', machine_code)),
-                oee=oee,
-                machine_group=machine_group,
-                availability_by_period=availability,
-                shift_system=shift_system
+            mg = str(row.get('Machine group', '')) if pd.notna(row.get('Machine group')) else None
+            ss = ShiftSystem.THREE_SHIFT
+            if mc == self.config.unlimited_capacity_machine:
+                ss = ShiftSystem.UNLIMITED
+            mid = str(row.get('MachineID', mc))
+            self.machines[mc] = Machine(
+                machine_id=mid, machine_code=mc, name=str(row.get('Machine name', mc)),
+                oee=oee, machine_group=mg if mg != 'nan' else None,
+                availability_by_period=avail, shift_system=ss
             )
-            
-            # Build groups
-            if machine_group and machine_group != 'nan':
-                if machine_group not in groups:
-                    groups[machine_group] = []
-                groups[machine_group].append(machine_code)
-        
-        # Create MachineGroup objects
-        for group_id, machine_codes in groups.items():
-            self.machine_groups[group_id] = MachineGroup(
-                group_id=group_id,
-                machine_codes=machine_codes,
-                shift_system=ShiftSystem.THREE_SHIFT
-            )
-        
-        print(f"  Machines: {len(self.machines)}")
-        print(f"  Machine groups: {len(self.machine_groups)}")
-    
+            if mg and mg != 'nan':
+                groups.setdefault(mg, []).append(mc)
+        for gid, mcs in groups.items():
+            self.machine_groups[gid] = MachineGroup(group_id=gid, machine_codes=mcs, shift_system=ShiftSystem.THREE_SHIFT)
+        print(f"  Machines: {len(self.machines)}, Groups: {len(self.machine_groups)}")
+
     def _load_routing(self):
-        """Load routing/work center assignments."""
         df = pd.read_excel(self.excel_file, sheet_name='Routing')
-        
         for _, row in df.iterrows():
-            material = str(row.get('Material', '')).strip()
-            if not material or material == 'nan':
+            mat = str(row.get('Material', '')).strip()
+            if not mat or mat == 'nan':
                 continue
-            
-            work_center = str(row.get('Work Center', '')).strip()
-            if not work_center:
+            wc = str(row.get('Work Center', '')).strip()
+            if not wc:
                 continue
-            
-            routing_item = RoutingItem(
-                plant=str(row.get('Plant', '')),
-                material=material,
+            ri = RoutingItem(
+                plant=str(row.get('Plant', '')), material=mat,
                 material_description=str(row.get('Material Description', '')),
-                work_center=work_center,
+                work_center=wc,
                 base_quantity=float(row.get('Base Quantity', 1)) if pd.notna(row.get('Base Quantity')) else 1,
                 standard_time=float(row.get('Standard Value 01', 0)) if pd.notna(row.get('Standard Value 01')) else 0,
                 production_version=str(row.get('PV', '')) if pd.notna(row.get('PV')) else None
             )
-            
-            if material not in self.routing:
-                self.routing[material] = []
-            self.routing[material].append(routing_item)
-        
+            self.routing.setdefault(mat, []).append(ri)
         print(f"  Routing: {sum(len(v) for v in self.routing.values())} items")
-    
+
     def _load_forecasts(self):
-        """Load demand forecasts - including historical actuals for Aux column calculation."""
         df = pd.read_excel(self.excel_file, sheet_name='Forecast sheet')
-        
-        # Find ALL period columns (not just planning periods)
         period_columns = []
         for col in df.columns:
-            col_str = str(col).strip()
-            if '/' in col_str and 'M' in col_str:
+            cs = str(col).strip()
+            if '/' in cs and 'M' in cs:
                 try:
-                    parts = col_str.replace(' ', '').split('/')
-                    year = parts[0]
-                    month = parts[1].replace('M', '').zfill(2)
-                    period_str = f"{year}-{month}"
-                    # Load ALL periods, not just planning periods
-                    period_columns.append((col, period_str))
+                    parts = cs.replace(' ', '').split('/')
+                    ps = f"{parts[0]}-{parts[1].replace('M', '').zfill(2)}"
+                    period_columns.append((col, ps))
                 except:
                     pass
-        
         for _, row in df.iterrows():
-            mat_num = str(row.get('Material number', '')).strip()
-            if not mat_num or mat_num == 'nan':
+            mn = str(row.get('Material number', '')).strip()
+            if not mn or mn == 'nan':
                 continue
-            
-            forecast_data = {}
-            for col, period_str in period_columns:
+            fd = {}
+            for col, ps in period_columns:
                 val = row.get(col)
                 if pd.notna(val) and float(val) != 0:
-                    forecast_data[period_str] = float(val)
-            
-            if forecast_data:
-                self.forecasts[mat_num] = forecast_data
-        
+                    fd[ps] = float(val)
+            # Include material if it's in material master (even if all zeros for active ones)
+            mat = self.materials.get(mn)
+            if mat and not mat.is_active:
+                continue  # Always skip inactive materials
+            if mat and fd is not None:
+                self.forecasts[mn] = fd if fd else {}
+            elif fd:
+                self.forecasts[mn] = fd
         print(f"  Forecasts: {len(self.forecasts)} materials")
-    
+
     def _load_stock_levels(self):
-        """Load current stock levels."""
         df = pd.read_excel(self.excel_file, sheet_name='Stock level sheet')
-        
         for _, row in df.iterrows():
-            material = str(row.get('Material', '')).strip()
-            if not material or material == 'nan':
+            mat = str(row.get('Material', '')).strip()
+            if not mat or mat == 'nan':
                 continue
-            
-            total = float(row.get('Total Stock', 0)) if pd.notna(row.get('Total Stock')) else 0
-            if total == 0:
-                total = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
-            
-            if material in self.stock_levels:
-                self.stock_levels[material] += total
-            else:
-                self.stock_levels[material] = total
-        
-        print(f"  Stock levels: {len(self.stock_levels)} materials")
-    
+            plant = str(row.get('Plant', '')).strip() if pd.notna(row.get('Plant')) else ''
+            if self.config and self.config.site and plant and plant != self.config.site:
+                continue
+            # VBA uses Unrestricted Stock only (not Total Stock which includes blocked)
+            total = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
+            self.stock_levels[mat] = self.stock_levels.get(mat, 0) + total
+        print(f"  Stock levels: {len(self.stock_levels)}")
+
     def _load_safety_stock(self):
-        """Load safety stock and lot size configurations."""
         df = pd.read_excel(self.excel_file, sheet_name='Safety stock')
-        
         for _, row in df.iterrows():
-            mat_num = str(row.get('Material number', '')).strip()
-            if not mat_num or mat_num == 'nan':
+            mn = str(row.get('Material number', '')).strip()
+            if not mn or mn == 'nan':
                 continue
-            
-            self.safety_stock[mat_num] = SafetyStockConfig(
-                material_number=mat_num,
+            self.safety_stock[mn] = SafetyStockConfig(
+                material_number=mn,
                 safety_stock=float(row.get('Final stafety stock', 0)) if pd.notna(row.get('Final stafety stock')) else 0,
                 lot_size=max(1, float(row.get('Lot size', 1)) if pd.notna(row.get('Lot size')) else 1),
                 strategic_stock=float(row.get('Strategic stock', 0)) if pd.notna(row.get('Strategic stock')) else 0,
                 target_stock=float(row.get('Target stock', 0)) if pd.notna(row.get('Target stock')) else 0
             )
-        
         print(f"  Safety stock: {len(self.safety_stock)} configs")
-    
-    def get_bom_for_parent(self, parent: str) -> List[BOMItem]:
-        """Get all BOM items where this material is the parent."""
+
+    def _load_purchase_sheet(self):
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Purchase sheet', header=None)
+            for i in range(1, len(df)):
+                mn = str(df.iloc[i, 0]).strip()
+                if not mn or mn == 'nan' or mn == 'Material number':
+                    continue
+                lt = df.iloc[i, 3]
+                try:
+                    lt_val = int(float(lt)) if pd.notna(lt) else 1
+                except (ValueError, TypeError):
+                    lt_val = 1
+                self.purchase_lead_times[mn] = lt_val
+                self.purchase_sheet_materials.add(mn)
+            print(f"  Purchase sheet: {len(self.purchase_lead_times)} lead times")
+        except Exception as e:
+            print(f"  Purchase sheet warning: {e}")
+
+    def _calculate_bom_levels(self):
+        parent_to_children = defaultdict(set)
+        child_to_parents = defaultdict(set)
+        all_mats = set()
+        for b in self.bom:
+            if b.is_coproduct:
+                continue
+            parent_to_children[b.parent_material].add(b.component_material)
+            child_to_parents[b.component_material].add(b.parent_material)
+            all_mats.add(b.parent_material)
+            all_mats.add(b.component_material)
+
+        roots = set()
+        for m in all_mats:
+            if m not in child_to_parents:
+                roots.add(m)
+        for m in self.forecasts:
+            if m in all_mats:
+                roots.add(m)
+
+        levels = {}
+        def assign(mat, level, visited):
+            if mat in visited:
+                return
+            visited.add(mat)
+            if mat not in levels or level > levels[mat]:
+                levels[mat] = level
+            for c in parent_to_children.get(mat, set()):
+                assign(c, level + 1, visited.copy())
+
+        for r in roots:
+            assign(r, 0, set())
+        for m in all_mats:
+            if m not in levels:
+                levels[m] = 0
+        self.bom_levels = levels
+
+    def get_materials_at_level(self, level):
+        return [m for m, l in self.bom_levels.items() if l == level]
+
+    def get_max_bom_level(self):
+        return max(self.bom_levels.values()) if self.bom_levels else 0
+
+    def _load_avg_sales_price(self):
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Average sales price')
+            for _, r in df.iterrows():
+                m = str(r.get('Material number', '')).strip()
+                p = r.get('Average sales price')
+                if m and m != 'nan' and pd.notna(p):
+                    self.avg_sales_price[m] = float(p)
+        except:
+            pass
+
+    def _load_cost_raw_material(self):
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Cost raw material')
+            for _, r in df.iterrows():
+                m = str(r.get('Material', r.get('Material number', ''))).strip()
+                pl = str(r.get('Plant', '')).strip() if pd.notna(r.get('Plant')) else ''
+                if self.config and self.config.site and pl and pl != self.config.site:
+                    continue
+                c = r.get('Standard Price') if pd.notna(r.get('Standard Price')) else r.get('Moving Average Price')
+                if m and m != 'nan' and pd.notna(c):
+                    self.cost_raw_material[m] = float(c)
+        except:
+            pass
+
+    def _load_cost_machine_hour(self):
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Cost machine hour')
+            for _, r in df.iterrows():
+                mc = str(r.get('Machine code', r.get('Work Center', ''))).strip()
+                c = r.get('Cost per hour')
+                if mc and mc != 'nan' and pd.notna(c):
+                    self.cost_machine_hour[mc] = float(c)
+        except:
+            pass
+
+    def _load_valuation_params(self):
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Valuation parameters')
+            for _, r in df.iterrows():
+                p = str(r.iloc[0]).strip() if pd.notna(r.iloc[0]) else ''
+                v = r.iloc[1] if len(r) > 1 and pd.notna(r.iloc[1]) else None
+                if p and v is not None:
+                    self.valuation_params[p] = float(v)
+        except:
+            pass
+
+    # === Helper methods ===
+    def is_purchased_and_produced(self, mat_num):
+        return mat_num in self.purchased_and_produced
+
+    def get_purchase_fraction(self, mat_num):
+        """Config fraction (e.g. 0.2) = PRODUCTION fraction."""
+        return self.purchased_and_produced.get(mat_num, 0.0)
+
+    def get_production_ceiling(self, mat_num):
+        """BOM header qty = ceiling multiple for production plan."""
+        children = self.get_bom_for_parent(mat_num)
+        if children:
+            return children[0].bom_header_quantity
+        return 1.0
+
+    def get_lead_time(self, mat_num):
+        if mat_num in self.purchase_lead_times:
+            return self.purchase_lead_times[mat_num]
+        return 1  # Default
+
+    def get_bom_for_parent(self, parent):
         return [b for b in self.bom if b.parent_material == parent and not b.is_coproduct]
-    
-    def get_primary_routing(self, material: str) -> Optional[RoutingItem]:
-        """Get primary routing for a material."""
-        routings = self.routing.get(material, [])
-        return routings[0] if routings else None
-    
-    def get_all_routings(self, material: str) -> List[RoutingItem]:
-        """Get all routings for a material."""
+
+    def get_primary_routing(self, material):
+        r = self.routing.get(material, [])
+        return r[0] if r else None
+
+    def get_all_routings(self, material):
         return self.routing.get(material, [])
