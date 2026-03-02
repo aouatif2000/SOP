@@ -74,7 +74,10 @@ class PlanningEngine:
 
         # ===== STEP 2: Demand Forecast (Line 01) =====
         print("\n[STEP 2] Calculating Demand Forecast (Line 01)...")
-        forecast_engine = ForecastEngine(self.data)
+        # Use config values if not explicitly overridden
+        actuals_months = self.months_actuals if self.months_actuals > 0 else getattr(self.data, 'forecast_actuals_months', 12)
+        forecast_months = self.months_forecast if self.months_forecast > 0 else self.data.config.forecast_months
+        forecast_engine = ForecastEngine(self.data, actuals_months, forecast_months)
         forecast_rows = forecast_engine.calculate()
         self.results[LineType.DEMAND_FORECAST.value] = forecast_rows
         forecasts = forecast_engine.get_all_forecasts()

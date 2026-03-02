@@ -33,7 +33,11 @@
                 <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Actuals:</label>
-                    <input type="number" id="monthsActuals" value="11" min="0" max="12" class="bg-slate-700 rounded px-2 py-1 w-14 text-center">
+                    <input type="number" id="monthsActuals" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of actuals months for AUX1 calculation">
+                </div>
+                <div class="flex gap-2 items-center text-sm">
+                    <label class="text-slate-400">Forecast:</label>
+                    <input type="number" id="monthsForecast" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of forecast months for AUX2 calculation">
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
@@ -135,13 +139,14 @@ async function uploadFile(e) {
 }
 async function runCalc() {
     status('Calculating...'); log('Starting Python engine...');
-    const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 0;
-    log('Parameters: months_actuals=' + monthsActuals);
+    const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
+    const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
+    log('Parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
     try {
         const res = await fetch('/api/calculate', { 
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ months_actuals: monthsActuals, months_forecast: 12 })
+            body: JSON.stringify({ months_actuals: monthsActuals, months_forecast: monthsForecast })
         });
         const data = await res.json();
         if (data.error) { alert(data.error); return; }

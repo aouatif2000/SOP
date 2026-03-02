@@ -54,9 +54,12 @@ class ForecastEngine:
 
     def _calculate_aux_columns(self, mat_num: str, forecast_data: Dict[str, float]) -> tuple:
         """
-        Aux 1: SUM of historical actuals / months_actuals (fixed divisor)
-               Excludes the month immediately before planning (may be partial)
-        Aux 2: Average demand over FORECAST (planning period months)
+        VBA Logic (from PDF):
+        AUX1 = IFERROR(AVERAGE(ForecastActualStart : ForecastActualStart + ForecastActualsMonths - 1), 0)
+             -> AVERAGE of the actuals range from the forecast sheet
+             -> AVERAGE ignores blanks, averages over months_actuals cells
+        AUX2 = IFERROR(AVERAGE(PlanningStartForecast : PlanningEndForecast), 0)
+             -> AVERAGE of the forecast values in the planning period columns
         """
         first_planning_period = min(self.periods) if self.periods else None
         if not first_planning_period:
@@ -71,19 +74,22 @@ class ForecastEngine:
             elif period in self.periods:
                 forecast_values.append(value)
 
-        # Aux 1: SUM of historical / months_actuals (fixed divisor)
-        # Exclude the last historical month (immediately before planning)
+        # Aux 1: AVERAGE of actuals (months_actuals cells from forecast sheet)
+        # VBA: AVERAGE(ForecastActualStartClmn : ForecastActualStartClmn + ForecastActualsMonths - 1)
+        # AVERAGE in Excel counts zeros, only ignores truly blank (missing) cells
+        # Take the first months_actuals values from historical
         if historical_values and self.months_actuals > 0:
-            actuals_pool = historical_values[:-1] if len(historical_values) > 1 else historical_values
-            total = sum(actuals_pool)
-            aux_1 = round(total / self.months_actuals, 2)
+            actuals_pool = historical_values[:self.months_actuals]
+            aux_1 = round(sum(actuals_pool) / len(actuals_pool), 2) if actuals_pool else 0.0
         else:
             aux_1 = 0.0
 
-        # Aux 2: SUM of forecast / count
+        # Aux 2: AVERAGE of forecast values in planning period
+        # VBA: AVERAGE(PlanningStartForecastClmn : PlanningEndForecastClmn)
+        # Use months_forecast to limit the range if specified
         if forecast_values:
-            total = sum(forecast_values)
-            aux_2 = round(total / len(forecast_values), 2)
+            pool = forecast_values[:self.months_forecast] if self.months_forecast > 0 else forecast_values
+            aux_2 = round(sum(pool) / len(pool), 2) if pool else 0.0
         else:
             aux_2 = 0.0
 

@@ -84,6 +84,7 @@ class DataLoader:
             df = pd.read_excel(self.excel_file, sheet_name='Config')
             initial_date = datetime(2025, 12, 1)
             forecast_months = 12
+            forecast_actuals_months = 12
             site = "NLX1"
             unlimited_machine = "PBA99"
 
@@ -97,6 +98,8 @@ class DataLoader:
                 value = row.iloc[1] if len(row) > 1 and pd.notna(row.iloc[1]) else None
                 if param == "ForecastMonths" and value:
                     forecast_months = int(value)
+                elif param == "ForecastActualsMonths" and value:
+                    forecast_actuals_months = int(value)
                 elif param == "Site" and value:
                     site = str(value)
                 elif param == "MachineUnlimitedCapacity" and value:
@@ -111,8 +114,10 @@ class DataLoader:
                 initial_date=initial_date, forecast_months=forecast_months,
                 site=site, unlimited_capacity_machine=unlimited_machine
             )
+            self.forecast_actuals_months = forecast_actuals_months
             self.periods = self.config.get_periods()
             print(f"  Config: {forecast_months}mo from {initial_date.strftime('%Y-%m')}, site={site}")
+            print(f"  ForecastActualsMonths: {forecast_actuals_months}")
             if self.purchased_and_produced:
                 print(f"  PurchasedAndProduced: {self.purchased_and_produced}")
         except Exception as e:
@@ -272,7 +277,8 @@ class DataLoader:
             fd = {}
             for col, ps in period_columns:
                 val = row.get(col)
-                if pd.notna(val) and float(val) != 0:
+                # Store ALL values including zeros - Excel AVERAGE counts zeros, only ignores blanks
+                if pd.notna(val):
                     fd[ps] = float(val)
             # Include material if it's in material master (even if all zeros for active ones)
             mat = self.materials.get(mn)
