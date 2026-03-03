@@ -84,12 +84,39 @@ class ForecastEngine:
         else:
             aux_1 = 0.0
 
-        # Aux 2: AVERAGE of forecast values in planning period
-        # VBA: AVERAGE(PlanningStartForecastClmn : PlanningEndForecastClmn)
-        # Use months_forecast to limit the range if specified
-        if forecast_values:
-            pool = forecast_values[:self.months_forecast] if self.months_forecast > 0 else forecast_values
-            aux_2 = round(sum(pool) / len(pool), 2) if pool else 0.0
+        # Aux 2: AVERAGE of values copied from forecast sheet to planning sheet
+        # VBA copies ForecastMonths values from forecast sheet starting at:
+        #   ForecastStartClmn = PlanningMonthCol - (ForecastActualsMonths - ForecastMonths)
+        # This means: start_month = planning_month - actuals_months + forecast_months
+        # When forecast_months == actuals_months (default 12), start = planning_month
+        # When forecast_months < actuals_months, start moves BEFORE planning month
+        # The range includes actuals data from the forecast sheet
+        all_sorted = sorted(forecast_data.items())
+        all_periods = [p for p, v in all_sorted]
+        all_values = [v for p, v in all_sorted]
+
+        if all_periods and self.months_forecast > 0:
+            # Find the planning month index in all_periods
+            planning_idx = None
+            for idx, p in enumerate(all_periods):
+                if p == first_planning_period:
+                    planning_idx = idx
+                    break
+
+            if planning_idx is not None:
+                # VBA: ForecastStartClmn offset = -(actuals_months - forecast_months) from planning month
+                offset = self.months_actuals - self.months_forecast
+                start_idx = planning_idx - offset
+                end_idx = start_idx + self.months_forecast
+
+                # Clamp to valid range
+                start_idx = max(0, start_idx)
+                end_idx = min(len(all_values), end_idx)
+
+                pool = all_values[start_idx:end_idx]
+                aux_2 = round(sum(pool) / len(pool), 2) if pool else 0.0
+            else:
+                aux_2 = round(sum(forecast_values) / len(forecast_values), 2) if forecast_values else 0.0
         else:
             aux_2 = 0.0
 
