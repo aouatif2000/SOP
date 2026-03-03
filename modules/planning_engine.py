@@ -77,6 +77,7 @@ class PlanningEngine:
         # Use config values if not explicitly overridden
         actuals_months = self.months_actuals if self.months_actuals > 0 else getattr(self.data, 'forecast_actuals_months', 12)
         forecast_months = self.months_forecast if self.months_forecast > 0 else self.data.config.forecast_months
+        print(f"  >> USING: actuals_months={actuals_months} (input={self.months_actuals}), forecast_months={forecast_months} (input={self.months_forecast})")
         forecast_engine = ForecastEngine(self.data, actuals_months, forecast_months)
         forecast_rows = forecast_engine.calculate()
         self.results[LineType.DEMAND_FORECAST.value] = forecast_rows

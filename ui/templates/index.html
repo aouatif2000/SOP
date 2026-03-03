@@ -141,7 +141,7 @@ async function runCalc() {
     status('Calculating...'); log('Starting Python engine...');
     const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
     const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
-    log('Parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
+    log('Sending parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
     try {
         const res = await fetch('/api/calculate', { 
             method: 'POST',
@@ -151,6 +151,9 @@ async function runCalc() {
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
         log('Complete! Rows: ' + data.summary.total_rows);
+        if (data.parameters) {
+            log('Engine used: actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
+        }
         Object.entries(data.summary.line_types).forEach(([lt, c]) => log('  ' + lt + ': ' + c));
         await loadResults();
         document.getElementById('exportBtn').disabled = false;
