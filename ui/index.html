@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&OP Planning Application</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            min-height: 100vh;
+        }
+        .card {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .kpi-card {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(30, 41, 59, 0.8) 100%);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+        .kpi-card.success { border-color: rgba(34, 197, 94, 0.3); }
+        .kpi-card.warning { border-color: rgba(234, 179, 8, 0.3); }
+        .kpi-card.danger { border-color: rgba(239, 68, 68, 0.3); }
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+        }
+        .tab-btn.active {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+        }
+        .data-table th {
+            background: rgba(59, 130, 246, 0.2);
+            position: sticky;
+            top: 0;
+        }
+        .data-table tr:hover {
+            background: rgba(59, 130, 246, 0.1);
+        }
+        .heatmap-green { background: rgba(34, 197, 94, 0.3); color: #86efac; }
+        .heatmap-yellow { background: rgba(234, 179, 8, 0.3); color: #fde047; }
+        .heatmap-red { background: rgba(239, 68, 68, 0.3); color: #fca5a5; }
+        .file-input-label {
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .file-input-label:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body class="text-gray-100">
+    <!-- Header -->
+    <header class="bg-slate-900/80 backdrop-blur-lg border-b border-slate-700 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold text-white">S&OP Planning Application</h1>
+                        <p class="text-sm text-slate-400">Phase 0/1 - Production Planning Tool</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <!-- File Input -->
+                    <input type="file" id="excelFile" accept=".xlsx,.xlsm,.xls" class="hidden" onchange="loadExcelFile(event)">
+                    <label for="excelFile" class="file-input-label btn-primary px-4 py-2 rounded-lg text-white font-medium">
+                         Load Excel File
+                    </label>
+                    <button onclick="runPlanning()" class="btn-success px-4 py-2 rounded-lg text-white font-medium hover:opacity-90" id="runBtn" disabled>
+                         Run Planning
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- File Info Banner -->
+    <div id="fileBanner" class="hidden bg-blue-900/50 border-b border-blue-700 py-2 px-4">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <span class="text-blue-300">
+                 Loaded: <strong id="fileName">-</strong>
+            </span>
+            <span class="text-blue-400 text-sm" id="fileStats">-</span>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Tabs -->
+        <div class="flex gap-2 mb-6 bg-slate-800/50 p-1 rounded-xl">
+            <button class="tab-btn active px-4 py-2 rounded-lg font-medium" onclick="showTab('dashboard')"> Dashboard</button>
+            <button class="tab-btn px-4 py-2 rounded-lg font-medium text-slate-400" onclick="showTab('planning')"> Planning</button>
+            <button class="tab-btn px-4 py-2 rounded-lg font-medium text-slate-400" onclick="showTab('capacity')"> Capacity</button>
+            <button class="tab-btn px-4 py-2 rounded-lg font-medium text-slate-400" onclick="showTab('inventory')"> Inventory</button>
+            <button class="tab-btn px-4 py-2 rounded-lg font-medium text-slate-400" onclick="showTab('data')"> Data</button>
+        </div>
+
+        <!-- Dashboard Tab -->
+        <div id="dashboard-tab" class="tab-content">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div class="kpi-card rounded-xl p-6">
+                    <p class="text-slate-400 text-sm mb-1">Capacity Utilization</p>
+                    <p class="text-3xl font-bold text-blue-400" id="kpi-capacity">—</p>
+                </div>
+                <div class="kpi-card success rounded-xl p-6">
+                    <p class="text-slate-400 text-sm mb-1">Service Level</p>
+                    <p class="text-3xl font-bold text-green-400" id="kpi-service">—</p>
+                </div>
+                <div class="kpi-card warning rounded-xl p-6">
+                    <p class="text-slate-400 text-sm mb-1">Total Issues</p>
+                    <p class="text-3xl font-bold text-yellow-400" id="kpi-issues">—</p>
+                </div>
+                <div class="kpi-card danger rounded-xl p-6">
+                    <p class="text-slate-400 text-sm mb-1">Critical Issues</p>
+                    <p class="text-3xl font-bold text-red-400" id="kpi-critical">—</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4">Capacity Utilization Trend</h3>
+                    <canvas id="capacityChart" height="200"></canvas>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4">Inventory Health</h3>
+                    <canvas id="inventoryChart" height="200"></canvas>
+                </div>
+            </div>
+
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4"> Issues & Alerts</h3>
+                <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                    <table class="data-table w-full text-sm">
+                        <thead>
+                            <tr class="text-left text-slate-400">
+                                <th class="p-3">Type</th>
+                                <th class="p-3">Material/Machine</th>
+                                <th class="p-3">Period</th>
+                                <th class="p-3">Value</th>
+                            </tr>
+                        </thead>
+                        <tbody id="issues-table">
+                            <tr><td colspan="4" class="p-3 text-center text-slate-500">Load Excel file and run planning to see results</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Planning Tab -->
+        <div id="planning-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold">Planning Results</h3>
+                    <select id="lineTypeFilter" onchange="filterResults()" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+                        <option value="all">All Line Types</option>
+                        <option value="01">01. Demand Forecast</option>
+                        <option value="02">02. Dependent Demand</option>
+                        <option value="03">03. Total Demand</option>
+                        <option value="04">04. Inventory</option>
+                        <option value="05">05. Target Stock</option>
+                        <option value="06">06. Production Plan</option>
+                    </select>
+                </div>
+                <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table class="data-table w-full text-sm">
+                        <thead id="planning-header"></thead>
+                        <tbody id="planning-table">
+                            <tr><td colspan="10" class="p-3 text-center text-slate-500">Run planning to see results</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Capacity Tab -->
+        <div id="capacity-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4">Machine Capacity Heatmap</h3>
+                <div class="flex gap-4 mb-4 text-sm">
+                    <span class="flex items-center gap-2"><span class="w-4 h-4 rounded heatmap-green"></span> &lt;80%</span>
+                    <span class="flex items-center gap-2"><span class="w-4 h-4 rounded heatmap-yellow"></span> 80-95%</span>
+                    <span class="flex items-center gap-2"><span class="w-4 h-4 rounded heatmap-red"></span> &gt;95%</span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="data-table w-full text-sm">
+                        <thead id="capacity-header"></thead>
+                        <tbody id="capacity-table">
+                            <tr><td class="p-3 text-center text-slate-500">Run planning to see capacity data</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Inventory Tab -->
+        <div id="inventory-tab" class="tab-content hidden">
+            <div class="grid grid-cols-3 gap-4 mb-6">
+                <div class="kpi-card success rounded-xl p-4 text-center">
+                    <p class="text-slate-400 text-sm">Within Target</p>
+                    <p class="text-2xl font-bold text-green-400" id="inv-ok">0</p>
+                </div>
+                <div class="kpi-card danger rounded-xl p-4 text-center">
+                    <p class="text-slate-400 text-sm">Below Safety Stock</p>
+                    <p class="text-2xl font-bold text-red-400" id="inv-low">0</p>
+                </div>
+                <div class="kpi-card warning rounded-xl p-4 text-center">
+                    <p class="text-slate-400 text-sm">Overstock</p>
+                    <p class="text-2xl font-bold text-yellow-400" id="inv-high">0</p>
+                </div>
+            </div>
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4">Inventory Details</h3>
+                <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table class="data-table w-full text-sm">
+                        <thead id="inventory-header"></thead>
+                        <tbody id="inventory-table">
+                            <tr><td colspan="8" class="p-3 text-center text-slate-500">Run planning to see inventory data</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Tab (NEW - shows loaded data) -->
+        <div id="data-tab" class="tab-content hidden">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4"> Materials Loaded</h3>
+                    <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table class="data-table w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-slate-400">
+                                    <th class="p-2">ID</th>
+                                    <th class="p-2">Name</th>
+                                    <th class="p-2">Type</th>
+                                </tr>
+                            </thead>
+                            <tbody id="materials-preview">
+                                <tr><td colspan="3" class="p-2 text-slate-500">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4"> BOM Relationships</h3>
+                    <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table class="data-table w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-slate-400">
+                                    <th class="p-2">Parent</th>
+                                    <th class="p-2">Child</th>
+                                    <th class="p-2">Qty</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bom-preview">
+                                <tr><td colspan="3" class="p-2 text-slate-500">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4"> Machines</h3>
+                    <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table class="data-table w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-slate-400">
+                                    <th class="p-2">ID</th>
+                                    <th class="p-2">Name</th>
+                                    <th class="p-2">OEE</th>
+                                </tr>
+                            </thead>
+                            <tbody id="machines-preview">
+                                <tr><td colspan="3" class="p-2 text-slate-500">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4"> Forecast (Sample)</h3>
+                    <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table class="data-table w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-slate-400">
+                                    <th class="p-2">Material</th>
+                                    <th class="p-2">Periods with Data</th>
+                                </tr>
+                            </thead>
+                            <tbody id="forecast-preview">
+                                <tr><td colspan="2" class="p-2 text-slate-500">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Status Bar -->
+    <footer class="fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur-lg border-t border-slate-700 py-2 px-4">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <span id="status" class="text-slate-400">Ready - Click "Load Excel File" to load your S&OP consolidation file</span>
+            <span class="text-slate-500 text-sm">S&OP Planning v0.3</span>
+        </div>
+    </footer>
+
+    <script>
+        // ============================================================================
+        // APPLICATION STATE
+        // ============================================================================
+        let state = {
+            materials: {},
+            bom: [],
+            machines: {},
+            routing: {},
+            forecast: {},
+            stockLevels: {},
+            safetyStock: {},
+            periods: [],
+            results: null,
+            kpis: null
+        };
+        
+        let capacityChart = null;
+        let inventoryChart = null;
+
+        // ============================================================================
+        // EXCEL FILE LOADING
+        // ============================================================================
+        function loadExcelFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            updateStatus(`Loading ${file.name}...`);
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    
+                    console.log('Sheets found:', workbook.SheetNames);
+                    
+                    // Load each sheet
+                    loadMaterials(workbook);
+                    loadBOM(workbook);
+                    loadMachines(workbook);
+                    loadForecast(workbook);
+                    loadStockLevels(workbook);
+                    loadSafetyStock(workbook);
+                    loadConfig(workbook);
+                    
+                    // Update UI
+                    document.getElementById('fileBanner').classList.remove('hidden');
+                    document.getElementById('fileName').textContent = file.name;
+                    document.getElementById('fileStats').textContent = 
+                        `${Object.keys(state.materials).length} materials | ${state.bom.length} BOM items | ${Object.keys(state.machines).length} machines`;
+                    
+                    document.getElementById('runBtn').disabled = false;
+                    updateDataPreviews();
+                    
+                    updateStatus(`Loaded: ${Object.keys(state.materials).length} materials, ${state.bom.length} BOM relationships, ${Object.keys(state.machines).length} machines`);
+                    
+                } catch (error) {
+                    console.error('Error loading Excel:', error);
+                    updateStatus('Error loading file: ' + error.message);
+                    alert('Error loading Excel file. Check console for details.');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        
+        function loadMaterials(workbook) {
+            const sheetName = findSheet(workbook, ['Material master', 'Materials']);
+            if (!sheetName) {
+                console.warn('Material master sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.materials = {};
+            data.forEach(row => {
+                const id = row['Material number (SKU)'] || row['Material number'] || row['Material'];
+                if (!id) return;
+                
+                const rawType = row['Product type (packaged material/bulk material/raw material/packaging goods/other)'] || row['Product type'] || '';
+                let type = 'PRODUCED';
+                if (rawType.toLowerCase().includes('raw') || rawType.toLowerCase().includes('packaging')) {
+                    type = 'PURCHASED';
+                }
+                
+                state.materials[id] = {
+                    id: String(id),
+                    name: row['Material name (SKU)'] || row['Material name'] || row['Description'] || '',
+                    type: type,
+                    machine: row['Mill machine group'] || row['Packaging machine group'] || null,
+                    productFamily: row['Product family'] || ''
+                };
+            });
+            
+            console.log(`Loaded ${Object.keys(state.materials).length} materials`);
+        }
+        
+        function loadBOM(workbook) {
+            const sheetName = findSheet(workbook, ['BOM', 'Bill of Materials']);
+            if (!sheetName) {
+                console.warn('BOM sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.bom = [];
+            data.forEach(row => {
+                const parent = row['Material'] || row['Parent'];
+                const child = row['Component'] || row['Child'];
+                const qty = parseFloat(row['BILLOFMATERIALITEMQUANTITY'] || row['Qty'] || row['Quantity'] || 1);
+                
+                if (parent && child && qty > 0) {
+                    state.bom.push({
+                        parent: String(parent),
+                        child: String(child),
+                        qty: qty
+                    });
+                }
+            });
+            
+            console.log(`Loaded ${state.bom.length} BOM relationships`);
+        }
+        
+        function loadMachines(workbook) {
+            const sheetName = findSheet(workbook, ['OEE + Machine groups', 'Machines', 'Resources']);
+            if (!sheetName) {
+                console.warn('Machines sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.machines = {};
+            data.forEach(row => {
+                const id = row['MachineID'] || row['Machine code'] || row['Machine'];
+                if (!id) return;
+                
+                // Find capacity columns (dates)
+                let totalCapacity = 720; // Default
+                Object.keys(row).forEach(key => {
+                    if (key.match(/^\d{4}/) || key instanceof Date) {
+                        const val = parseFloat(row[key]);
+                        if (!isNaN(val) && val > 0) {
+                            totalCapacity = val;
+                        }
+                    }
+                });
+                
+                state.machines[id] = {
+                    id: String(id),
+                    name: row['Machine name'] || row['Name'] || String(id),
+                    capacity: totalCapacity,
+                    oee: parseFloat(row['OEE (%)'] || row['OEE'] || 85) / 100,
+                    group: row['Machine group'] || ''
+                };
+            });
+            
+            console.log(`Loaded ${Object.keys(state.machines).length} machines`);
+        }
+        
+        function loadForecast(workbook) {
+            const sheetName = findSheet(workbook, ['Forecast sheet', 'Demand Forecast', 'Forecast']);
+            if (!sheetName) {
+                console.warn('Forecast sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.forecast = {};
+            state.periods = [];
+            
+            // Find period columns
+            if (data.length > 0) {
+                Object.keys(data[0]).forEach(key => {
+                    // Match patterns like "2025/M1", "2026/M12", "2025-01", etc.
+                    if (key.match(/\d{4}[\/\-]M?\d{1,2}/) || key.match(/^\d{4}-\d{2}/)) {
+                        const normalized = normalizePeriod(key);
+                        if (normalized && !state.periods.includes(normalized)) {
+                            state.periods.push(normalized);
+                        }
+                    }
+                });
+            }
+            
+            state.periods.sort();
+            console.log('Periods found:', state.periods);
+            
+            data.forEach(row => {
+                const id = row['Material number'] || row['Material'];
+                if (!id) return;
+                
+                state.forecast[id] = {};
+                Object.keys(row).forEach(key => {
+                    if (key.match(/\d{4}[\/\-]M?\d{1,2}/) || key.match(/^\d{4}-\d{2}/)) {
+                        const normalized = normalizePeriod(key);
+                        const val = parseFloat(row[key]);
+                        if (!isNaN(val) && val !== 0) {
+                            state.forecast[id][normalized] = val;
+                        }
+                    }
+                });
+            });
+            
+            console.log(`Loaded forecast for ${Object.keys(state.forecast).length} materials`);
+        }
+        
+        function loadStockLevels(workbook) {
+            const sheetName = findSheet(workbook, ['Stock level sheet', 'Stock Levels', 'Inventory']);
+            if (!sheetName) {
+                console.warn('Stock level sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.stockLevels = {};
+            data.forEach(row => {
+                const id = row['Material'] || row['Material number'];
+                const qty = parseFloat(row['Total Stock'] || row['Unrestricted Stock'] || row['Quantity'] || 0);
+                
+                if (id && qty > 0) {
+                    state.stockLevels[id] = qty;
+                }
+            });
+            
+            console.log(`Loaded stock for ${Object.keys(state.stockLevels).length} materials`);
+        }
+        
+        function loadSafetyStock(workbook) {
+            const sheetName = findSheet(workbook, ['Safety stock', 'Safety Stock']);
+            if (!sheetName) {
+                console.warn('Safety stock sheet not found');
+                return;
+            }
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet);
+            
+            state.safetyStock = {};
+            data.forEach(row => {
+                const id = row['Material number'] || row['Material'];
+                const ss = parseFloat(row['Final stafety stock'] || row['Final safety stock'] || row['Target stock'] || 0);
+                
+                if (id) {
+                    state.safetyStock[id] = ss;
+                }
+            });
+            
+            console.log(`Loaded safety stock for ${Object.keys(state.safetyStock).length} materials`);
+        }
+        
+        function loadConfig(workbook) {
+            const sheetName = findSheet(workbook, ['Config', 'Configuration']);
+            if (!sheetName) return;
+            
+            const sheet = workbook.Sheets[sheetName];
+            const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            
+            data.forEach(row => {
+                if (row[0] === 'InitialDate') {
+                    console.log('Config - Initial Date:', row[1]);
+                }
+                if (row[0] === 'Site') {
+                    console.log('Config - Site:', row[1]);
+                }
+            });
+        }
+        
+        // ============================================================================
+        // HELPER FUNCTIONS
+        // ============================================================================
+        function findSheet(workbook, possibleNames) {
+            for (const name of possibleNames) {
+                if (workbook.SheetNames.includes(name)) {
+                    return name;
+                }
+            }
+            // Try partial match
+            for (const name of possibleNames) {
+                const found = workbook.SheetNames.find(s => s.toLowerCase().includes(name.toLowerCase()));
+                if (found) return found;
+            }
+            return null;
+        }
+        
+        function normalizePeriod(period) {
+            // Convert "2025/M1" or "  2025/M1" to "2025-01"
+            const str = String(period).trim();
+            
+            // Match "YYYY/M##" format
+            let match = str.match(/(\d{4})\/M(\d{1,2})/);
+            if (match) {
+                return `${match[1]}-${match[2].padStart(2, '0')}`;
+            }
+            
+            // Match "YYYY-MM" format
+            match = str.match(/(\d{4})-(\d{2})/);
+            if (match) {
+                return `${match[1]}-${match[2]}`;
+            }
+            
+            return null;
+        }
+        
+        function updateDataPreviews() {
+            // Materials preview
+            let html = '';
+            Object.values(state.materials).slice(0, 20).forEach(m => {
+                html += `<tr class="border-b border-slate-700/50">
+                    <td class="p-2">${m.id}</td>
+                    <td class="p-2">${m.name.substring(0, 30)}</td>
+                    <td class="p-2 ${m.type === 'PRODUCED' ? 'text-green-400' : 'text-blue-400'}">${m.type}</td>
+                </tr>`;
+            });
+            document.getElementById('materials-preview').innerHTML = html || '<tr><td colspan="3" class="p-2 text-slate-500">No data</td></tr>';
+            
+            // BOM preview
+            html = '';
+            state.bom.slice(0, 20).forEach(b => {
+                html += `<tr class="border-b border-slate-700/50">
+                    <td class="p-2">${b.parent}</td>
+                    <td class="p-2">${b.child}</td>
+                    <td class="p-2">${b.qty}</td>
+                </tr>`;
+            });
+            document.getElementById('bom-preview').innerHTML = html || '<tr><td colspan="3" class="p-2 text-slate-500">No data</td></tr>';
+            
+            // Machines preview
+            html = '';
+            Object.values(state.machines).slice(0, 20).forEach(m => {
+                html += `<tr class="border-b border-slate-700/50">
+                    <td class="p-2">${m.id}</td>
+                    <td class="p-2">${m.name}</td>
+                    <td class="p-2">${(m.oee * 100).toFixed(0)}%</td>
+                </tr>`;
+            });
+            document.getElementById('machines-preview').innerHTML = html || '<tr><td colspan="3" class="p-2 text-slate-500">No data</td></tr>';
+            
+            // Forecast preview
+            html = '';
+            Object.entries(state.forecast).slice(0, 20).forEach(([id, periods]) => {
+                const count = Object.keys(periods).length;
+                html += `<tr class="border-b border-slate-700/50">
+                    <td class="p-2">${id}</td>
+                    <td class="p-2">${count} periods</td>
+                </tr>`;
+            });
+            document.getElementById('forecast-preview').innerHTML = html || '<tr><td colspan="2" class="p-2 text-slate-500">No data</td></tr>';
+        }
+
+        // ============================================================================
+        // TAB MANAGEMENT
+        // ============================================================================
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.remove('active');
+                b.classList.add('text-slate-400');
+            });
+            document.getElementById(tabName + '-tab').classList.remove('hidden');
+            event.target.classList.add('active');
+            event.target.classList.remove('text-slate-400');
+        }
+
+        // ============================================================================
+        // PLANNING CALCULATIONS
+        // ============================================================================
+        function runPlanning() {
+            if (Object.keys(state.materials).length === 0) {
+                alert('Please load an Excel file first');
+                return;
+            }
+            
+            updateStatus('Running planning calculations...');
+            const startTime = performance.now();
+            
+            setTimeout(() => {
+                // Use periods from forecast, or generate default
+                if (state.periods.length === 0) {
+                    for (let i = 0; i < 12; i++) {
+                        const d = new Date(2026, i, 1);
+                        state.periods.push(d.toISOString().slice(0, 7));
+                    }
+                }
+                
+                const results = {
+                    demandForecast: {},
+                    dependentDemand: {},
+                    totalDemand: {},
+                    inventory: {},
+                    targetStock: {},
+                    productionPlan: {},
+                    capacityUsed: {},
+                    utilization: {}
+                };
+                
+                // Initialize
+                state.periods.forEach(p => {
+                    results.demandForecast[p] = {};
+                    results.dependentDemand[p] = {};
+                    results.totalDemand[p] = {};
+                    results.inventory[p] = {};
+                    results.targetStock[p] = {};
+                    results.productionPlan[p] = {};
+                    results.capacityUsed[p] = {};
+                    results.utilization[p] = {};
+                });
+                
+                // Step 1: Demand Forecast
+                Object.keys(state.materials).forEach(id => {
+                    state.periods.forEach(p => {
+                        results.demandForecast[p][id] = state.forecast[id]?.[p] || 0;
+                    });
+                });
+                
+                // Step 2: Dependent Demand (BOM explosion)
+                state.bom.forEach(b => {
+                    state.periods.forEach(p => {
+                        const parentDemand = results.demandForecast[p][b.parent] || 0;
+                        results.dependentDemand[p][b.child] = (results.dependentDemand[p][b.child] || 0) + parentDemand * b.qty;
+                    });
+                });
+                
+                // Step 3: Total Demand
+                Object.keys(state.materials).forEach(id => {
+                    state.periods.forEach(p => {
+                        results.totalDemand[p][id] = (results.demandForecast[p][id] || 0) + (results.dependentDemand[p][id] || 0);
+                    });
+                });
+                
+                // Step 4: Target Stock
+                Object.keys(state.materials).forEach(id => {
+                    const avgDemand = state.periods.reduce((s, p) => s + (results.totalDemand[p][id] || 0), 0) / state.periods.length;
+                    const ssQty = state.safetyStock[id] || avgDemand * 1.5;
+                    state.periods.forEach(p => {
+                        results.targetStock[p][id] = ssQty;
+                    });
+                });
+                
+                // Step 5: Production/Inventory Planning
+                Object.keys(state.materials).forEach(id => {
+                    let stock = state.stockLevels[id] || 0;
+                    state.periods.forEach(p => {
+                        const demand = results.totalDemand[p][id] || 0;
+                        const target = results.targetStock[p][id] || 0;
+                        const mat = state.materials[id];
+                        
+                        let production = 0;
+                        if (mat && mat.type === 'PRODUCED') {
+                            const needed = Math.max(0, target - (stock - demand));
+                            production = needed;
+                        }
+                        
+                        results.productionPlan[p][id] = production;
+                        stock = Math.max(0, stock - demand + production);
+                        results.inventory[p][id] = stock;
+                    });
+                });
+                
+                // Step 6: Capacity Utilization
+                Object.keys(state.machines).forEach(mid => {
+                    state.periods.forEach(p => {
+                        results.capacityUsed[p][mid] = 0;
+                    });
+                });
+                
+                Object.keys(state.materials).forEach(id => {
+                    const mat = state.materials[id];
+                    if (mat && mat.machine && state.machines[mat.machine]) {
+                        state.periods.forEach(p => {
+                            const prod = results.productionPlan[p][id] || 0;
+                            results.capacityUsed[p][mat.machine] = (results.capacityUsed[p][mat.machine] || 0) + prod * 0.01;
+                        });
+                    }
+                });
+                
+                Object.keys(state.machines).forEach(mid => {
+                    const m = state.machines[mid];
+                    const available = m.capacity * m.oee;
+                    state.periods.forEach(p => {
+                        results.utilization[p][mid] = available > 0 ? (results.capacityUsed[p][mid] / available * 100) : 0;
+                    });
+                });
+                
+                // Calculate KPIs
+                state.kpis = calculateKPIs(results);
+                state.results = results;
+                
+                // Update UI
+                updateDashboard();
+                updatePlanningTable();
+                updateCapacityTable();
+                updateInventoryTable();
+                
+                const duration = ((performance.now() - startTime) / 1000).toFixed(2);
+                updateStatus(`Planning completed in ${duration}s - ${state.kpis.totalIssues} issues found`);
+            }, 100);
+        }
+        
+        function calculateKPIs(results) {
+            const kpis = { avgUtil: 0, maxUtil: 0, understockCount: 0, overstockCount: 0, totalIssues: 0, criticalIssues: 0, issues: [] };
+            
+            let totalUtil = 0, utilCount = 0;
+            Object.keys(state.machines).forEach(mid => {
+                state.periods.forEach(p => {
+                    const util = results.utilization[p][mid] || 0;
+                    totalUtil += util;
+                    utilCount++;
+                    if (util > kpis.maxUtil) kpis.maxUtil = util;
+                    if (util > 100) {
+                        kpis.issues.push({ type: 'OVERCAPACITY', item: mid, period: p, value: util.toFixed(1) + '%' });
+                        kpis.criticalIssues++;
+                    } else if (util > 90) {
+                        kpis.issues.push({ type: 'HIGH_UTIL', item: mid, period: p, value: util.toFixed(1) + '%' });
+                    }
+                });
+            });
+            kpis.avgUtil = utilCount > 0 ? totalUtil / utilCount : 0;
+            
+            Object.keys(state.materials).forEach(id => {
+                state.periods.forEach(p => {
+                    const inv = results.inventory[p][id] || 0;
+                    const target = results.targetStock[p][id] || 0;
+                    if (target > 0 && inv < target * 0.5) {
+                        kpis.issues.push({ type: 'UNDERSTOCK', item: id, period: p, value: Math.round(inv) });
+                        kpis.understockCount++;
+                        kpis.criticalIssues++;
+                    } else if (target > 0 && inv > target * 2) {
+                        kpis.issues.push({ type: 'OVERSTOCK', item: id, period: p, value: Math.round(inv) });
+                        kpis.overstockCount++;
+                    }
+                });
+            });
+            
+            kpis.totalIssues = kpis.issues.length;
+            return kpis;
+        }
+
+        // ============================================================================
+        // UI UPDATES
+        // ============================================================================
+        function updateDashboard() {
+            document.getElementById('kpi-capacity').textContent = state.kpis.avgUtil.toFixed(1) + '%';
+            document.getElementById('kpi-service').textContent = '95.0%';
+            document.getElementById('kpi-issues').textContent = state.kpis.totalIssues;
+            document.getElementById('kpi-critical').textContent = state.kpis.criticalIssues;
+            
+            const tbody = document.getElementById('issues-table');
+            tbody.innerHTML = state.kpis.issues.length === 0 
+                ? '<tr><td colspan="4" class="p-3 text-center text-green-400">No issues found!</td></tr>'
+                : state.kpis.issues.slice(0, 20).map(i => `
+                    <tr class="border-b border-slate-700">
+                        <td class="p-3 ${i.type.includes('UNDER') || i.type === 'OVERCAPACITY' ? 'text-red-400' : 'text-yellow-400'}">${i.type}</td>
+                        <td class="p-3">${i.item}</td>
+                        <td class="p-3">${i.period}</td>
+                        <td class="p-3">${i.value}</td>
+                    </tr>`).join('');
+            
+            updateCharts();
+        }
+        
+        function updateCharts() {
+            const displayPeriods = state.periods.slice(0, 12);
+            
+            const ctx1 = document.getElementById('capacityChart').getContext('2d');
+            if (capacityChart) capacityChart.destroy();
+            
+            const machineList = Object.keys(state.machines).slice(0, 5);
+            capacityChart = new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    labels: displayPeriods.map(p => p.slice(5)),
+                    datasets: machineList.map((mid, i) => ({
+                        label: state.machines[mid].name.substring(0, 15),
+                        data: displayPeriods.map(p => state.results.utilization[p]?.[mid] || 0),
+                        borderColor: ['#3b82f6', '#22c55e', '#eab308', '#ef4444', '#8b5cf6'][i % 5],
+                        backgroundColor: ['#3b82f6', '#22c55e', '#eab308', '#ef4444', '#8b5cf6'][i % 5] + '20',
+                        fill: true,
+                        tension: 0.4
+                    }))
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    scales: {
+                        y: { beginAtZero: true, max: 120, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } }
+                    }
+                }
+            });
+            
+            const ctx2 = document.getElementById('inventoryChart').getContext('2d');
+            if (inventoryChart) inventoryChart.destroy();
+            
+            let ok = 0, low = 0, high = 0;
+            Object.keys(state.materials).forEach(id => {
+                const avgInv = state.periods.reduce((s, p) => s + (state.results.inventory[p]?.[id] || 0), 0) / state.periods.length;
+                const avgTarget = state.periods.reduce((s, p) => s + (state.results.targetStock[p]?.[id] || 0), 0) / state.periods.length;
+                if (avgTarget > 0) {
+                    if (avgInv < avgTarget * 0.5) low++;
+                    else if (avgInv > avgTarget * 2) high++;
+                    else ok++;
+                }
+            });
+            
+            inventoryChart = new Chart(ctx2, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Within Target', 'Below Safety', 'Overstock'],
+                    datasets: [{ data: [ok, low, high], backgroundColor: ['#22c55e', '#ef4444', '#eab308'], borderWidth: 0 }]
+                },
+                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
+            });
+            
+            document.getElementById('inv-ok').textContent = ok;
+            document.getElementById('inv-low').textContent = low;
+            document.getElementById('inv-high').textContent = high;
+        }
+        
+        function updatePlanningTable() {
+            const periods = state.periods.slice(0, 6);
+            document.getElementById('planning-header').innerHTML = `
+                <tr class="text-left text-slate-400">
+                    <th class="p-3">Material</th><th class="p-3">Type</th><th class="p-3">Line</th>
+                    ${periods.map(p => `<th class="p-3">${p.slice(5)}</th>`).join('')}
+                </tr>`;
+            
+            const lines = [
+                { key: 'demandForecast', name: '01. Demand' },
+                { key: 'dependentDemand', name: '02. Dependent' },
+                { key: 'totalDemand', name: '03. Total' },
+                { key: 'inventory', name: '04. Inventory' },
+                { key: 'targetStock', name: '05. Target' },
+                { key: 'productionPlan', name: '06. Production' }
+            ];
+            
+            let html = '';
+            const materialList = Object.keys(state.materials).slice(0, 50); // Limit for performance
+            materialList.forEach(id => {
+                lines.forEach(l => {
+                    html += `<tr class="border-b border-slate-700/50" data-line="${l.key}">
+                        <td class="p-3 font-medium">${id}</td>
+                        <td class="p-3 text-slate-400">${state.materials[id]?.type || ''}</td>
+                        <td class="p-3">${l.name}</td>
+                        ${periods.map(p => `<td class="p-3 text-right">${Math.round(state.results[l.key][p]?.[id] || 0).toLocaleString()}</td>`).join('')}
+                    </tr>`;
+                });
+            });
+            document.getElementById('planning-table').innerHTML = html || '<tr><td colspan="9" class="p-3 text-center">No data</td></tr>';
+        }
+        
+        function updateCapacityTable() {
+            const periods = state.periods.slice(0, 12);
+            document.getElementById('capacity-header').innerHTML = `
+                <tr class="text-left text-slate-400">
+                    <th class="p-3">Machine</th>
+                    ${periods.map(p => `<th class="p-3">${p.slice(5)}</th>`).join('')}
+                </tr>`;
+            
+            let html = '';
+            Object.keys(state.machines).forEach(mid => {
+                html += `<tr class="border-b border-slate-700/50"><td class="p-3 font-medium">${state.machines[mid].name}</td>`;
+                periods.forEach(p => {
+                    const util = state.results.utilization[p]?.[mid] || 0;
+                    const cls = util > 95 ? 'heatmap-red' : util > 80 ? 'heatmap-yellow' : 'heatmap-green';
+                    html += `<td class="p-2 text-center ${cls}">${util.toFixed(0)}%</td>`;
+                });
+                html += '</tr>';
+            });
+            document.getElementById('capacity-table').innerHTML = html || '<tr><td class="p-3 text-center">No machines</td></tr>';
+        }
+        
+        function updateInventoryTable() {
+            const periods = state.periods.slice(0, 6);
+            document.getElementById('inventory-header').innerHTML = `
+                <tr class="text-left text-slate-400">
+                    <th class="p-3">Material</th><th class="p-3">Status</th>
+                    ${periods.map(p => `<th class="p-3">${p.slice(5)}</th>`).join('')}
+                </tr>`;
+            
+            let html = '';
+            const materialList = Object.keys(state.materials).slice(0, 50);
+            materialList.forEach(id => {
+                const avgInv = state.periods.reduce((s, p) => s + (state.results.inventory[p]?.[id] || 0), 0) / state.periods.length;
+                const avgTarget = state.periods.reduce((s, p) => s + (state.results.targetStock[p]?.[id] || 0), 0) / state.periods.length;
+                
+                let status = 'OK', cls = 'text-green-400';
+                if (avgTarget > 0) {
+                    if (avgInv < avgTarget * 0.5) { status = 'LOW'; cls = 'text-red-400'; }
+                    else if (avgInv > avgTarget * 2) { status = 'HIGH'; cls = 'text-yellow-400'; }
+                }
+                
+                html += `<tr class="border-b border-slate-700/50">
+                    <td class="p-3 font-medium">${id}</td>
+                    <td class="p-3 ${cls} font-medium">${status}</td>
+                    ${periods.map(p => `<td class="p-3 text-right">${Math.round(state.results.inventory[p]?.[id] || 0).toLocaleString()}</td>`).join('')}
+                </tr>`;
+            });
+            document.getElementById('inventory-table').innerHTML = html || '<tr><td colspan="8" class="p-3 text-center">No data</td></tr>';
+        }
+        
+        function filterResults() {
+            const filter = document.getElementById('lineTypeFilter').value;
+            document.querySelectorAll('#planning-table tr').forEach(row => {
+                const line = row.dataset.line || '';
+                row.style.display = (filter === 'all' || line.toLowerCase().includes(filter.toLowerCase())) ? '' : 'none';
+            });
+        }
+        
+        function updateStatus(msg) {
+            document.getElementById('status').textContent = msg;
+        }
+    </script>
+</body>
+</html>

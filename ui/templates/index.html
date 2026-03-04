@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&OP Planning Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); min-height: 100vh; }
+        .card { background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .kpi-card { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(30, 41, 59, 0.8) 100%); border: 1px solid rgba(59, 130, 246, 0.3); }
+        .btn-primary { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); }
+        .btn-success { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); }
+        .tab-btn.active { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; }
+        .data-table th { background: rgba(59, 130, 246, 0.2); position: sticky; top: 0; z-index: 10; }
+        .data-table td, .data-table th { border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 12px; }
+        .heatmap-green { background: rgba(34, 197, 94, 0.3); }
+        .heatmap-yellow { background: rgba(234, 179, 8, 0.3); }
+        .heatmap-red { background: rgba(239, 68, 68, 0.3); }
+        #log { font-family: monospace; font-size: 11px; white-space: pre-wrap; }
+    </style>
+</head>
+<body class="text-gray-100">
+    <header class="bg-slate-900/80 border-b border-slate-700 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-4">
+            <div>
+                <h1 class="text-xl font-bold">S&OP Planning Engine</h1>
+                <p class="text-sm text-slate-400">Python Implementation (Replaces VBA Macros)</p>
+            </div>
+            <div class="flex gap-3 items-center">
+                <input type="file" id="fileInput" accept=".xlsx,.xlsm" class="hidden" onchange="uploadFile(event)">
+                <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
+                <div class="flex gap-2 items-center text-sm">
+                    <label class="text-slate-400">Actuals:</label>
+                    <input type="number" id="monthsActuals" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of actuals months for AUX1 calculation">
+                </div>
+                <div class="flex gap-2 items-center text-sm">
+                    <label class="text-slate-400">Forecast:</label>
+                    <input type="number" id="monthsForecast" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of forecast months for AUX2 calculation">
+                </div>
+                <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
+                <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
+            </div>
+        </div>
+    </header>
+    <div id="fileBanner" class="hidden bg-blue-900/50 border-b border-blue-700 py-2 px-4">
+        <span class="text-blue-300"><strong id="fileName">-</strong></span>
+        <span class="text-blue-400 text-sm ml-4" id="fileStats">-</span>
+    </div>
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <div class="flex gap-2 mb-6 bg-slate-800/50 p-1 rounded-xl flex-wrap">
+            <button class="tab-btn active px-4 py-2 rounded-lg" onclick="showTab('dashboard',this)">Dashboard</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('planning',this)">Planning</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('capacity',this)">Capacity</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('inventory',this)">Inventory</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('log',this)">Log</button>
+        </div>
+        <div id="dashboard-tab" class="tab-content">
+            <div class="grid grid-cols-4 gap-4 mb-6">
+                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Materials</p><p class="text-3xl font-bold text-blue-400" id="kpi-mat">-</p></div>
+                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Avg Utilization</p><p class="text-3xl font-bold text-green-400" id="kpi-util">-</p></div>
+                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">BOM Items</p><p class="text-3xl font-bold text-yellow-400" id="kpi-bom">-</p></div>
+                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Line Types</p><p class="text-3xl font-bold text-red-400" id="kpi-lt">-</p></div>
+            </div>
+            <div class="grid grid-cols-2 gap-6">
+                <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Utilization by Machine</h3><canvas id="utilChart" height="200"></canvas></div>
+                <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Summary by Line Type (All 14)</h3><div id="summaryDiv" class="overflow-auto max-h-96 text-sm"></div></div>
+            </div>
+        </div>
+        <div id="planning-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6">
+                <div class="flex justify-between mb-4 flex-wrap gap-2">
+                    <h3 class="font-semibold">Planning Results (Python Calculated)</h3>
+                    <div class="flex gap-2">
+                        <select id="ltFilter" onchange="loadPlanningData()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
+                        <input id="matSearch" onkeyup="filterTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
+                    </div>
+                </div>
+                <div class="overflow-auto max-h-[500px]"><table class="data-table w-full"><thead id="planHead"></thead><tbody id="planBody"><tr><td colspan="10" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+                <p class="mt-2 text-sm text-slate-400">Rows: <span id="rowCount">0</span></p>
+            </div>
+        </div>
+        <div id="capacity-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6">
+                <h3 class="font-semibold mb-4">Machine Utilization Heatmap</h3>
+                <div class="flex gap-4 mb-4 text-sm">
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-green"></span> &lt;80%</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-yellow"></span> 80-95%</span>
+                    <span class="flex items-center gap-1"><span class="w-4 h-4 rounded heatmap-red"></span> &gt;95%</span>
+                </div>
+                <div class="overflow-auto"><table class="data-table w-full"><thead id="capHead"></thead><tbody id="capBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+            </div>
+        </div>
+        <div id="inventory-tab" class="tab-content hidden">
+            <div class="grid grid-cols-3 gap-4 mb-6">
+                <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Healthy</p><p class="text-2xl font-bold text-green-400" id="inv-ok">0</p></div>
+                <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Low Stock</p><p class="text-2xl font-bold text-red-400" id="inv-low">0</p></div>
+                <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Overstock</p><p class="text-2xl font-bold text-yellow-400" id="inv-high">0</p></div>
+            </div>
+            <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Inventory Status</h3>
+                <div class="overflow-auto max-h-[400px]"><table class="data-table w-full"><thead id="invHead"></thead><tbody id="invBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+            </div>
+        </div>
+        <div id="log-tab" class="tab-content hidden">
+            <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Calculation Log</h3><div id="log" class="bg-slate-900 p-4 rounded-lg max-h-[500px] overflow-auto text-green-400"></div></div>
+        </div>
+    </main>
+    <footer class="fixed bottom-0 left-0 right-0 bg-slate-900/90 border-t border-slate-700 py-2 px-4">
+        <span id="status" class="text-slate-400">Ready</span>
+    </footer>
+<script>
+let state = { periods: [], results: null, lineTypes: [] };
+let utilChart = null;
+function log(msg) { const d = document.getElementById('log'); d.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`; d.scrollTop = d.scrollHeight; }
+function status(msg) { document.getElementById('status').textContent = msg; }
+function showTab(name, btn) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active'); b.classList.add('text-slate-400'); });
+    document.getElementById(name + '-tab').classList.remove('hidden');
+    if (btn) { btn.classList.add('active'); btn.classList.remove('text-slate-400'); }
+}
+async function uploadFile(e) {
+    const file = e.target.files[0]; if (!file) return;
+    status('Uploading...'); log('Uploading ' + file.name);
+    const formData = new FormData(); formData.append('file', file);
+    try {
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('fileBanner').classList.remove('hidden');
+        document.getElementById('fileName').textContent = data.filename;
+        document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
+        document.getElementById('kpi-mat').textContent = data.summary.materials;
+        document.getElementById('kpi-bom').textContent = data.summary.bom_items;
+        document.getElementById('calcBtn').disabled = false;
+        log('Raw data loaded'); status('Click Calculate');
+    } catch (err) { alert('Error: ' + err); }
+}
+async function runCalc() {
+    status('Calculating...'); log('Starting Python engine...');
+    const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
+    const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
+    log('Sending parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
+    try {
+        const res = await fetch('/api/calculate', { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ months_actuals: monthsActuals, months_forecast: monthsForecast })
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        log('Complete! Rows: ' + data.summary.total_rows);
+        if (data.parameters) {
+            log('Engine used: actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
+        }
+        Object.entries(data.summary.line_types).forEach(([lt, c]) => log('  ' + lt + ': ' + c));
+        await loadResults();
+        document.getElementById('exportBtn').disabled = false;
+        document.getElementById('kpi-lt').textContent = data.summary.line_types_count;
+        status('Done - ' + data.summary.total_rows + ' rows');
+    } catch (err) { alert('Error: ' + err); }
+}
+async function loadResults() {
+    const res = await fetch('/api/results'); const data = await res.json();
+    state.results = data.results; state.periods = data.periods; state.lineTypes = Object.keys(data.results).sort();
+    const filter = document.getElementById('ltFilter');
+    filter.innerHTML = '<option value="all">All Line Types</option>';
+    state.lineTypes.forEach(lt => { const c = state.results[lt]?.length || 0; if (c > 0) filter.innerHTML += `<option value="${lt}">${lt} (${c})</option>`; });
+    updateDashboard(); loadPlanningData(); loadCapacityData(); loadInventoryData();
+}
+function updateDashboard() {
+    let html = '<table class="w-full"><tr class="text-slate-400"><th class="text-left p-2">Line Type</th><th class="text-right p-2">Count</th></tr>';
+    state.lineTypes.forEach(lt => { html += `<tr><td class="p-2">${lt}</td><td class="text-right p-2">${state.results[lt]?.length || 0}</td></tr>`; });
+    html += '</table><p class="mt-4 text-green-400">All ' + state.lineTypes.length + ' line types generated</p>';
+    document.getElementById('summaryDiv').innerHTML = html;
+    loadUtilChart();
+}
+async function loadUtilChart() {
+    try {
+        const res = await fetch('/api/capacity'); const data = await res.json();
+        const ctx = document.getElementById('utilChart').getContext('2d');
+        if (utilChart) utilChart.destroy();
+        const periods = data.periods.slice(0, 12);
+        const datasets = data.utilization.slice(0, 6).map((m, i) => ({ label: m.machine.substring(0, 15), data: periods.map(p => m.values[p] || 0), borderColor: ['#3b82f6','#22c55e','#eab308','#ef4444','#8b5cf6','#ec4899'][i], tension: 0.4 }));
+        utilChart = new Chart(ctx, { type: 'line', data: { labels: periods, datasets }, options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8' } } }, scales: { y: { beginAtZero: true, max: 150, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v + '%' } }, x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } } } } });
+        let total = 0, count = 0; data.utilization.forEach(m => { Object.values(m.values).forEach(v => { total += v; count++; }); });
+        document.getElementById('kpi-util').textContent = count > 0 ? (total / count).toFixed(1) + '%' : '0%';
+    } catch (err) { log('Chart error: ' + err); }
+}
+function loadPlanningData() {
+    const lt = document.getElementById('ltFilter').value;
+    const periods = state.periods.slice(0, 8);
+    document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+    let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
+    document.getElementById('rowCount').textContent = items.length;
+    let html = items.slice(0, 500).map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400">${item.aux_2_column || '-'}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
+    document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+}
+function filterTable() { const s = document.getElementById('matSearch').value.toLowerCase(); document.querySelectorAll('#planBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; }); }
+async function loadCapacityData() {
+    try {
+        const res = await fetch('/api/capacity'); const data = await res.json();
+        const periods = data.periods.slice(0, 12);
+        document.getElementById('capHead').innerHTML = `<tr class="text-slate-400"><th>Machine</th>${periods.map(p => `<th class="text-center">${p}</th>`).join('')}</tr>`;
+        let html = data.utilization.map(m => `<tr><td>${m.machine}</td>${periods.map(p => { const v = m.values[p] || 0; const cls = v > 95 ? 'heatmap-red' : v > 80 ? 'heatmap-yellow' : 'heatmap-green'; return `<td class="text-center ${cls}">${v.toFixed(0)}%</td>`; }).join('')}</tr>`).join('');
+        document.getElementById('capBody').innerHTML = html || '<tr><td>No data</td></tr>';
+    } catch (err) { log('Error: ' + err); }
+}
+async function loadInventoryData() {
+    try {
+        const res = await fetch('/api/inventory'); const data = await res.json();
+        document.getElementById('inv-ok').textContent = data.summary.healthy;
+        document.getElementById('inv-low').textContent = data.summary.low;
+        document.getElementById('inv-high').textContent = data.summary.high;
+        const periods = data.periods.slice(0, 8);
+        document.getElementById('invHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Status</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+        let html = data.data.slice(0, 100).map(item => { const cls = item.status === 'LOW' ? 'text-red-400' : item.status === 'HIGH' ? 'text-yellow-400' : 'text-green-400'; return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 18)}</td><td class="font-bold ${cls}">${item.status}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`; }).join('');
+        document.getElementById('invBody').innerHTML = html || '<tr><td>No data</td></tr>';
+    } catch (err) { log('Error: ' + err); }
+}
+function exportData() { window.location.href = '/api/export'; }
+function fmt(n) { if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return n.toFixed(n % 1 === 0 ? 0 : 1); }
+</script>
+</body>
+</html>
