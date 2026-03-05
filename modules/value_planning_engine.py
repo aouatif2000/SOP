@@ -94,7 +94,12 @@ class ValuePlanningEngine:
     def _make_value_row(self, src: PlanningRow, line_type: str,
                         unit_price: float, starting_stock_value: float = 0.0
                         ) -> PlanningRow:
-        """Build a value row: aux_column = unit_price, values = price × volume."""
+        """Build a value row: aux_column = unit_price, values = price × volume.
+        
+        VBA CopyDataAndApplyFormula copies columns 1-8 only (up to LineTypeClmn).
+        AUX1 (col 9) is set by Add_* subs.
+        AUX2 (col 10) is NOT set for individual material rows.
+        """
         vr = PlanningRow(
             material_number=src.material_number,
             material_name=src.material_name,
@@ -105,7 +110,7 @@ class ValuePlanningEngine:
             product_name=src.product_name,
             line_type=line_type,
             aux_column=unit_price,
-            aux_2_column=src.aux_2_column,
+            aux_2_column=None,  # VBA does NOT set aux2 for individual rows
             starting_stock=starting_stock_value,
         )
         for p in self.periods:
@@ -322,9 +327,22 @@ class ValuePlanningEngine:
 
         consol: List[PlanningRow] = []
 
-        def _cr(mat_num, aux, vals, use_avg=False):
-            """Create a consolidation row. VBA: some use SUM for aux2, some use AVERAGE."""
-            if use_avg:
+        def _cr(mat_num, aux, vals, use_avg=False, include_starting_in_avg=False):
+            """Create a consolidation row.
+            VBA: some use SUM for aux2, some use AVERAGE.
+            INVENTORY VALUE uses AVERAGE(StartForecast-1 : EndForecast) — includes starting stock!
+            """
+            if include_starting_in_avg:
+                # VBA: AVERAGE(PlanningStartForecastClmn - 1 : PlanningEndForecastClmn)
+                # This includes the Starting Stock column, so it's 13 values not 12
+                starting = sum(
+                    r.starting_stock
+                    for r in self.value_results.get(LineType.INVENTORY.value, [])
+                )
+                all_vals = [starting] + [vals[p] for p in P]
+                n = len(all_vals)
+                a2 = sum(all_vals) / n if n > 0 else 0
+            elif use_avg:
                 n = len(vals)
                 a2 = sum(vals.values()) / n if n > 0 else 0
             else:
@@ -391,8 +409,9 @@ class ValuePlanningEngine:
         nbv = const(vp.net_book_value)
         consol.append(_cr("ZZZZZZ_FIXED ASSETS NET BOOK VALUE", None, nbv, use_avg=True))
 
-        # 14: Inventory Value (VBA: aux2 = AVERAGE, SUMIFS by "04. Inventory")
-        consol.append(_cr("ZZZZZZ_INVENTORY VALUE", "04. Inventory", T['inventory'], use_avg=True))
+        # 14: Inventory Value (VBA: aux2 = AVERAGE(StartForecast-1 : EndForecast), includes starting stock!)
+        consol.append(_cr("ZZZZZZ_INVENTORY VALUE", "04. Inventory", T['inventory'],
+                          include_starting_in_avg=True))
 
         # 15: Receivables = Turnover / 30 * DSO (VBA: aux2 = AVERAGE)
         recv = scale(T['turnover'], vp.days_sales_outstanding / 30)

@@ -48,10 +48,6 @@ class DataLoader:
         self.material_costs: Dict[str, RawMaterialCost] = {}
         self.machine_costs: Dict[str, MachineCost] = {}
         self.valuation_params: Optional[ValuationParameters] = None
-        
-        # Load workbook for Excel operations
-        import openpyxl
-        self.wb = openpyxl.load_workbook(file_path, data_only=True)
 
     def load_all(self) -> 'DataLoader':
         print(f"Loading raw data from: {self.file_path.name}")
@@ -408,7 +404,7 @@ class DataLoader:
         where material AND site match, then price = totalRevenue / totalVolume.
         """
         sheet_name = 'Average sales price'
-        if sheet_name not in self.wb.sheetnames:
+        if sheet_name not in self.excel_file.sheet_names:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
@@ -445,7 +441,7 @@ class DataLoader:
     def _load_cost_raw_material(self):
         """Load raw material costs, filtered by site."""
         sheet_name = 'Cost raw material'
-        if sheet_name not in self.wb.sheetnames:
+        if sheet_name not in self.excel_file.sheet_names:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
@@ -475,7 +471,7 @@ class DataLoader:
         Key = first 5 chars of Cost Center (e.g. 'PBA11' from 'PBA11-NLX1').
         """
         sheet_name = 'Cost machine hour'
-        if sheet_name not in self.wb.sheetnames:
+        if sheet_name not in self.excel_file.sheet_names:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
@@ -507,7 +503,7 @@ class DataLoader:
     def _load_valuation_params(self):
         """Load valuation parameters for financial calculations."""
         sheet_name = 'Valuation parameters'
-        if sheet_name not in self.wb.sheetnames:
+        if sheet_name not in self.excel_file.sheet_names:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
