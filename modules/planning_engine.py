@@ -22,6 +22,7 @@ from modules.forecast_engine import ForecastEngine
 from modules.bom_engine import BOMEngine
 from modules.inventory_engine import InventoryEngine
 from modules.capacity_engine import CapacityEngine
+from modules.value_planning_engine import ValuePlanningEngine
 
 
 class PlanningEngine:
@@ -42,6 +43,7 @@ class PlanningEngine:
         LineType.UTILIZATION_RATE.value,
         LineType.SHIFT_AVAILABILITY.value,
         LineType.FTE_REQUIREMENTS.value,
+        LineType.CONSOLIDATION.value,
     ]
 
     def __init__(self, file_path: str, planning_month: str = None,
@@ -60,6 +62,10 @@ class PlanningEngine:
         self.all_production_plans: Dict[str, Dict[str, float]] = {}
         self.all_purchase_receipts: Dict[str, Dict[str, float]] = {}
         self.all_total_demands: Dict[str, Dict[str, float]] = {}
+        
+        # Value planning (NEW)
+        self.value_results: Dict[str, List[PlanningRow]] = {}
+        self.value_engine: Optional[ValuePlanningEngine] = None
 
     def run(self) -> 'PlanningEngine':
         """Run the complete planning pipeline."""
@@ -197,6 +203,11 @@ class PlanningEngine:
         capacity_results = capacity_engine.calculate()
         for line_type, rows in capacity_results.items():
             self.results[line_type] = rows
+        
+        # ===== STEP 6: Value planning calculations =====
+        print("\n[STEP 6] Calculating value planning...")
+        self.value_engine = ValuePlanningEngine(self.data, self.results)
+        self.value_results = self.value_engine.calculate()
 
         # ===== Compile and validate =====
         self._compile_all_rows()
@@ -289,6 +300,41 @@ class PlanningEngine:
         df = self.to_dataframe()
         df.to_excel(output_path, sheet_name='Planning Results', index=False)
         print(f"\nResults exported to: {output_path}")
+    
+    def to_excel_with_values(self, output_path: str):
+        """Export both volume planning and value planning to Excel."""
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Volume planning sheet
+            df_volumes = self.to_dataframe()
+            df_volumes.to_excel(writer, sheet_name='Planning sheet', index=False)
+            
+            # Value planning sheet
+            value_rows = []
+            for line_type, rows in self.value_results.items():
+                for row in rows:
+                    row_dict = {
+                        'Material number': row.material_number,
+                        'Material name': row.material_name,
+                        'Product type': row.product_type,
+                        'Product family': row.product_family,
+                        'SPC product': row.spc_product,
+                        'Product cluster': row.product_cluster,
+                        'Product name': row.product_name,
+                        'Line type': row.line_type,
+                        'Aux Column': row.aux_column,
+                        'Aux 2 Column': row.aux_2_column,
+                        'Starting stock': row.starting_stock,
+                    }
+                    for period, value in row.values.items():
+                        row_dict[period] = value
+                    value_rows.append(row_dict)
+            
+            df_values = pd.DataFrame(value_rows)
+            df_values.to_excel(writer, sheet_name='Values_Planning sheet', index=False)
+        
+        print(f"\nResults exported to: {output_path}")
+        print(f"  - Planning sheet (volumes)")
+        print(f"  - Values_Planning sheet (financial)")
 
     def to_json(self) -> Dict:
         return {

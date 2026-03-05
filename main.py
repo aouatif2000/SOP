@@ -33,10 +33,10 @@ def run_cli(file_path: str, output_path: str = None, planning_month: str = None,
     engine.run()
 
     if output_path:
-        engine.to_excel(output_path)
+        engine.to_excel_with_values(output_path)
     else:
         output_path = str(Path(file_path).stem) + '_Python_Results.xlsx'
-        engine.to_excel(output_path)
+        engine.to_excel_with_values(output_path)
 
     return engine
 

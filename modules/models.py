@@ -47,6 +47,7 @@ class LineType(Enum):
     UTILIZATION_RATE = "10. Utilization rate"
     SHIFT_AVAILABILITY = "11. Shift availability"
     FTE_REQUIREMENTS = "12. FTE requirements"
+    CONSOLIDATION = "13. Consolidation"
 
 
 class ShiftSystem(Enum):
@@ -218,3 +219,48 @@ class PlanningRow:
             'starting_stock': self.starting_stock,
             'values': self.values,
         }
+
+
+@dataclass
+class ValuationParameters:
+    """Financial parameters for value calculations."""
+    direct_fte_cost_per_month: float  # Cost number 1
+    indirect_fte_cost_per_month: float  # Cost number 2
+    overhead_cost_per_month: float  # Cost number 3
+    sga_cost_per_month: float  # Cost number 4
+    depreciation_per_year: float  # Cost number 5
+    net_book_value: float  # Cost number 6
+    days_sales_outstanding: int  # Cost number 7
+    days_payable_outstanding: int  # Cost number 8
+
+
+@dataclass
+class SalesPriceItem:
+    """Average sales price for a product."""
+    plant_code: str
+    product_id: str
+    volume_2025: float
+    ex_works_revenue: float
+    
+    @property
+    def price_per_unit(self) -> float:
+        if self.volume_2025 > 0:
+            return self.ex_works_revenue / self.volume_2025
+        return 0.0
+
+
+@dataclass
+class RawMaterialCost:
+    """Cost per unit for raw materials."""
+    plant_code: str
+    product_code: str
+    product_name: str
+    cost_per_unit: float
+
+
+@dataclass
+class MachineCost:
+    """Machine hour cost."""
+    plant_code: str
+    cost_center: str
+    variable_cost_per_hour: float  # Activity type 50

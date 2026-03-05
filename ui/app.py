@@ -125,6 +125,34 @@ def get_results():
     })
 
 
+@app.route('/api/value_results')
+def get_value_results():
+    """Return value planning results (financial)."""
+    global current_engine
+    
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    
+    if not current_engine.value_results:
+        return jsonify({'error': 'No value planning results available'}), 400
+    
+    results = {}
+    for lt, rows in current_engine.value_results.items():
+        results[lt] = [row.to_dict() for row in rows]
+    
+    # Extract consolidation rows separately for the financial overview
+    consolidation = []
+    from modules.models import LineType
+    for row in current_engine.value_results.get(LineType.CONSOLIDATION.value, []):
+        consolidation.append(row.to_dict())
+    
+    return jsonify({
+        'periods': current_engine.data.periods,
+        'results': results,
+        'consolidation': consolidation
+    })
+
+
 @app.route('/api/capacity')
 def get_capacity():
     global current_engine
@@ -208,7 +236,7 @@ def export():
     export_dir.mkdir(exist_ok=True)
     
     export_path = export_dir / f'SOP_Python_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
-    current_engine.to_excel(str(export_path))
+    current_engine.to_excel_with_values(str(export_path))
     
     return send_file(str(export_path), as_attachment=True)
 

@@ -12,7 +12,8 @@ from collections import defaultdict
 
 from modules.models import (
     Material, BOMItem, RoutingItem, Machine, MachineGroup,
-    SafetyStockConfig, PlanningConfig, ProductType, ShiftSystem
+    SafetyStockConfig, PlanningConfig, ProductType, ShiftSystem,
+    ValuationParameters, SalesPriceItem, RawMaterialCost, MachineCost
 )
 
 
@@ -31,6 +32,7 @@ class DataLoader:
         self.machine_groups: Dict[str, MachineGroup] = {}
         self.forecasts: Dict[str, Dict[str, float]] = {}
         self.stock_levels: Dict[str, float] = {}
+        self.stock: Dict[str, Dict[str, float]] = {}  # NEW: includes both qty and value
         self.safety_stock: Dict[str, SafetyStockConfig] = {}
         self.periods: List[str] = []
 
@@ -40,10 +42,16 @@ class DataLoader:
         self.purchase_sheet_materials: Set[str] = set()
         self.purchased_and_produced: Dict[str, float] = {}
         self.bom_levels: Dict[str, int] = {}
-        self.avg_sales_price: Dict[str, float] = {}
-        self.cost_raw_material: Dict[str, float] = {}
-        self.cost_machine_hour: Dict[str, float] = {}
-        self.valuation_params: Dict[str, float] = {}
+        
+        # Financial data (NEW)
+        self.sales_prices: Dict[str, SalesPriceItem] = {}
+        self.material_costs: Dict[str, RawMaterialCost] = {}
+        self.machine_costs: Dict[str, MachineCost] = {}
+        self.valuation_params: Optional[ValuationParameters] = None
+        
+        # Load workbook for Excel operations
+        import openpyxl
+        self.wb = openpyxl.load_workbook(file_path, data_only=True)
 
     def load_all(self) -> 'DataLoader':
         print(f"Loading raw data from: {self.file_path.name}")
@@ -300,8 +308,18 @@ class DataLoader:
             if self.config and self.config.site and plant and plant != self.config.site:
                 continue
             # VBA uses Unrestricted Stock only (not Total Stock which includes blocked)
-            total = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
-            self.stock_levels[mat] = self.stock_levels.get(mat, 0) + total
+            total_qty = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
+            total_value = float(row.get('Total Value', 0)) if pd.notna(row.get('Total Value')) else 0
+            total_stock_qty = float(row.get('Total Stock', 0)) if pd.notna(row.get('Total Stock')) else 0
+            
+            self.stock_levels[mat] = self.stock_levels.get(mat, 0) + total_qty
+            
+            # Store both quantity and value for inventory valuation
+            if mat not in self.stock:
+                self.stock[mat] = {'Total Stock': 0, 'Total Value': 0}
+            self.stock[mat]['Total Stock'] += total_stock_qty
+            self.stock[mat]['Total Value'] += total_value
+            
         print(f"  Stock levels: {len(self.stock_levels)}")
 
     def _load_safety_stock(self):
@@ -381,51 +399,106 @@ class DataLoader:
         return max(self.bom_levels.values()) if self.bom_levels else 0
 
     def _load_avg_sales_price(self):
-        try:
-            df = pd.read_excel(self.excel_file, sheet_name='Average sales price')
-            for _, r in df.iterrows():
-                m = str(r.get('Material number', '')).strip()
-                p = r.get('Average sales price')
-                if m and m != 'nan' and pd.notna(p):
-                    self.avg_sales_price[m] = float(p)
-        except:
-            pass
+        """Load average sales price data."""
+        sheet_name = 'Average sales price'
+        if sheet_name not in self.wb.sheetnames:
+            print(f"  Warning: '{sheet_name}' sheet not found")
+            return
+        
+        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        
+        # Map product IDs to SalesPriceItem
+        for _, row in df.iterrows():
+            product_id = str(row.get('ProductId', '')).strip()
+            if product_id and pd.notna(row.get('Volume 2025 (t)')):
+                self.sales_prices[product_id] = SalesPriceItem(
+                    plant_code=str(row.get('PlantCode', '')),
+                    product_id=product_id,
+                    volume_2025=float(row.get('Volume 2025 (t)', 0)),
+                    ex_works_revenue=float(row.get('ExWorksRevenue', 0))
+                )
+        
+        print(f"  Loaded {len(self.sales_prices)} sales price items")
 
     def _load_cost_raw_material(self):
-        try:
-            df = pd.read_excel(self.excel_file, sheet_name='Cost raw material')
-            for _, r in df.iterrows():
-                m = str(r.get('Material', r.get('Material number', ''))).strip()
-                pl = str(r.get('Plant', '')).strip() if pd.notna(r.get('Plant')) else ''
-                if self.config and self.config.site and pl and pl != self.config.site:
-                    continue
-                c = r.get('Standard Price') if pd.notna(r.get('Standard Price')) else r.get('Moving Average Price')
-                if m and m != 'nan' and pd.notna(c):
-                    self.cost_raw_material[m] = float(c)
-        except:
-            pass
+        """Load raw material costs."""
+        sheet_name = 'Cost raw material'
+        if sheet_name not in self.wb.sheetnames:
+            print(f"  Warning: '{sheet_name}' sheet not found")
+            return
+        
+        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        
+        # Map material codes to cost per unit
+        for _, row in df.iterrows():
+            material = str(row.get('Product Code', '')).strip()
+            if material and pd.notna(row.get('Cost Per Unit')):
+                self.material_costs[material] = RawMaterialCost(
+                    plant_code=str(row.get('Plant Code', '')),
+                    product_code=material,
+                    product_name=str(row.get('Product Name', '')),
+                    cost_per_unit=float(row.get('Cost Per Unit', 0))
+                )
+        
+        print(f"  Loaded {len(self.material_costs)} raw material costs")
 
     def _load_cost_machine_hour(self):
-        try:
-            df = pd.read_excel(self.excel_file, sheet_name='Cost machine hour')
-            for _, r in df.iterrows():
-                mc = str(r.get('Machine code', r.get('Work Center', ''))).strip()
-                c = r.get('Cost per hour')
-                if mc and mc != 'nan' and pd.notna(c):
-                    self.cost_machine_hour[mc] = float(c)
-        except:
-            pass
+        """Load machine hour costs (variable costs only - Activity Type 50)."""
+        sheet_name = 'Cost machine hour'
+        if sheet_name not in self.wb.sheetnames:
+            print(f"  Warning: '{sheet_name}' sheet not found")
+            return
+        
+        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        
+        # Map cost centers to variable cost per hour
+        for _, row in df.iterrows():
+            activity_type = row.get('Activity Type', '')
+            # Only get variable costs (Activity Type 50)
+            if str(activity_type) == '50':
+                cost_center = str(row.get('Cost Center', '')).strip()[:5]  # First 5 digits
+                if cost_center and pd.notna(row.get('Vbl. price in OCrcy')):
+                    self.machine_costs[cost_center] = MachineCost(
+                        plant_code=str(row.get('Plant Code', '')),
+                        cost_center=cost_center,
+                        variable_cost_per_hour=float(row.get('Vbl. price in OCrcy', 0))
+                    )
+        
+        print(f"  Loaded {len(self.machine_costs)} machine costs")
 
     def _load_valuation_params(self):
-        try:
-            df = pd.read_excel(self.excel_file, sheet_name='Valuation parameters')
-            for _, r in df.iterrows():
-                p = str(r.iloc[0]).strip() if pd.notna(r.iloc[0]) else ''
-                v = r.iloc[1] if len(r) > 1 and pd.notna(r.iloc[1]) else None
-                if p and v is not None:
-                    self.valuation_params[p] = float(v)
-        except:
-            pass
+        """Load valuation parameters for financial calculations."""
+        sheet_name = 'Valuation parameters'
+        if sheet_name not in self.wb.sheetnames:
+            print(f"  Warning: '{sheet_name}' sheet not found")
+            return
+        
+        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        
+        # Extract values by cost number
+        params = {}
+        for _, row in df.iterrows():
+            cost_num = row.get('Cost number')
+            value = row.get('Value')
+            if pd.notna(cost_num) and pd.notna(value):
+                params[int(cost_num)] = float(value)
+        
+        if len(params) < 8:
+            print(f"  Warning: Only {len(params)}/8 valuation parameters loaded")
+            return
+        
+        self.valuation_params = ValuationParameters(
+            direct_fte_cost_per_month=params.get(1, 0),
+            indirect_fte_cost_per_month=params.get(2, 0),
+            overhead_cost_per_month=params.get(3, 0),
+            sga_cost_per_month=params.get(4, 0),
+            depreciation_per_year=params.get(5, 0),
+            net_book_value=params.get(6, 0),
+            days_sales_outstanding=int(params.get(7, 0)),
+            days_payable_outstanding=int(params.get(8, 0))
+        )
+        
+        print(f"  Loaded valuation parameters")
 
     # === Helper methods ===
     def is_purchased_and_produced(self, mat_num):

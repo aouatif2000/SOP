@@ -19,6 +19,15 @@
         .heatmap-yellow { background: rgba(234, 179, 8, 0.3); }
         .heatmap-red { background: rgba(239, 68, 68, 0.3); }
         #log { font-family: monospace; font-size: 11px; white-space: pre-wrap; }
+        .consol-row { transition: background 0.15s; }
+        .consol-row:hover { background: rgba(255,255,255,0.05); }
+        .consol-turnover { border-left: 3px solid #22c55e; }
+        .consol-cost { border-left: 3px solid #f97316; }
+        .consol-margin { border-left: 3px solid #3b82f6; }
+        .consol-ebit { border-left: 3px solid #eab308; }
+        .consol-asset { border-left: 3px solid #6366f1; }
+        .consol-roce { border-left: 3px solid #ec4899; }
+        .consol-separator { border-top: 2px solid rgba(255,255,255,0.2); }
     </style>
 </head>
 <body class="text-gray-100">
@@ -33,11 +42,11 @@
                 <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Actuals:</label>
-                    <input type="number" id="monthsActuals" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of actuals months for AUX1 calculation">
+                    <input type="number" id="monthsActuals" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center">
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Forecast:</label>
-                    <input type="number" id="monthsForecast" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" title="Number of forecast months for AUX2 calculation">
+                    <input type="number" id="monthsForecast" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center">
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
@@ -52,10 +61,13 @@
         <div class="flex gap-2 mb-6 bg-slate-800/50 p-1 rounded-xl flex-wrap">
             <button class="tab-btn active px-4 py-2 rounded-lg" onclick="showTab('dashboard',this)">Dashboard</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('planning',this)">Planning</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('values',this)">Values Planning</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('capacity',this)">Capacity</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('inventory',this)">Inventory</button>
             <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('log',this)">Log</button>
         </div>
+
+        <!-- Dashboard Tab -->
         <div id="dashboard-tab" class="tab-content">
             <div class="grid grid-cols-4 gap-4 mb-6">
                 <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Materials</p><p class="text-3xl font-bold text-blue-400" id="kpi-mat">-</p></div>
@@ -68,6 +80,8 @@
                 <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Summary by Line Type (All 14)</h3><div id="summaryDiv" class="overflow-auto max-h-96 text-sm"></div></div>
             </div>
         </div>
+
+        <!-- Planning Tab -->
         <div id="planning-tab" class="tab-content hidden">
             <div class="card rounded-xl p-6">
                 <div class="flex justify-between mb-4 flex-wrap gap-2">
@@ -81,6 +95,59 @@
                 <p class="mt-2 text-sm text-slate-400">Rows: <span id="rowCount">0</span></p>
             </div>
         </div>
+
+        <!-- Values Planning Tab -->
+        <div id="values-tab" class="tab-content hidden">
+            <!-- Financial KPIs -->
+            <div class="grid grid-cols-4 gap-4 mb-6">
+                <div class="kpi-card rounded-xl p-4" style="border-color: rgba(34, 197, 94, 0.4);">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide">Avg Monthly Turnover</p>
+                    <p class="text-2xl font-bold text-green-400 mt-1" id="vp-turnover">-</p>
+                </div>
+                <div class="kpi-card rounded-xl p-4" style="border-color: rgba(234, 179, 8, 0.4);">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide">Avg Monthly EBITDA</p>
+                    <p class="text-2xl font-bold text-yellow-400 mt-1" id="vp-ebitda">-</p>
+                </div>
+                <div class="kpi-card rounded-xl p-4" style="border-color: rgba(59, 130, 246, 0.4);">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide">Avg Monthly EBIT</p>
+                    <p class="text-2xl font-bold text-blue-400 mt-1" id="vp-ebit">-</p>
+                </div>
+                <div class="kpi-card rounded-xl p-4" style="border-color: rgba(236, 72, 153, 0.4);">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide">Avg ROCE</p>
+                    <p class="text-2xl font-bold text-pink-400 mt-1" id="vp-roce">-</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-6 mb-6">
+                <!-- Financial Consolidation (P&L Tree) -->
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Financial Consolidation (P&L / ROCE)</h3>
+                    <div class="overflow-auto max-h-[480px]" id="consolDiv">
+                        <p class="text-slate-500 text-sm">Run calculations to see financial consolidation</p>
+                    </div>
+                </div>
+                <!-- Financial Chart -->
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Financial Performance Over Time</h3>
+                    <canvas id="finChart" height="220"></canvas>
+                </div>
+            </div>
+
+            <!-- Value Planning Data Table -->
+            <div class="card rounded-xl p-6">
+                <div class="flex justify-between mb-4 flex-wrap gap-2">
+                    <h3 class="font-semibold">Values Planning Sheet (Financial Values)</h3>
+                    <div class="flex gap-2">
+                        <select id="vpLtFilter" onchange="loadValuePlanningData()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
+                        <input id="vpMatSearch" onkeyup="filterVPTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
+                    </div>
+                </div>
+                <div class="overflow-auto max-h-[500px]"><table class="data-table w-full"><thead id="vpHead"></thead><tbody id="vpBody"><tr><td colspan="10" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+                <p class="mt-2 text-sm text-slate-400">Rows: <span id="vpRowCount">0</span></p>
+            </div>
+        </div>
+
+        <!-- Capacity Tab -->
         <div id="capacity-tab" class="tab-content hidden">
             <div class="card rounded-xl p-6">
                 <h3 class="font-semibold mb-4">Machine Utilization Heatmap</h3>
@@ -92,6 +159,8 @@
                 <div class="overflow-auto"><table class="data-table w-full"><thead id="capHead"></thead><tbody id="capBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
             </div>
         </div>
+
+        <!-- Inventory Tab -->
         <div id="inventory-tab" class="tab-content hidden">
             <div class="grid grid-cols-3 gap-4 mb-6">
                 <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Healthy</p><p class="text-2xl font-bold text-green-400" id="inv-ok">0</p></div>
@@ -102,6 +171,8 @@
                 <div class="overflow-auto max-h-[400px]"><table class="data-table w-full"><thead id="invHead"></thead><tbody id="invBody"><tr><td class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
             </div>
         </div>
+
+        <!-- Log Tab -->
         <div id="log-tab" class="tab-content hidden">
             <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Calculation Log</h3><div id="log" class="bg-slate-900 p-4 rounded-lg max-h-[500px] overflow-auto text-green-400"></div></div>
         </div>
@@ -110,8 +181,10 @@
         <span id="status" class="text-slate-400">Ready</span>
     </footer>
 <script>
-let state = { periods: [], results: null, lineTypes: [] };
+let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [] };
 let utilChart = null;
+let finChart = null;
+
 function log(msg) { const d = document.getElementById('log'); d.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`; d.scrollTop = d.scrollHeight; }
 function status(msg) { document.getElementById('status').textContent = msg; }
 function showTab(name, btn) {
@@ -120,6 +193,7 @@ function showTab(name, btn) {
     document.getElementById(name + '-tab').classList.remove('hidden');
     if (btn) { btn.classList.add('active'); btn.classList.remove('text-slate-400'); }
 }
+
 async function uploadFile(e) {
     const file = e.target.files[0]; if (!file) return;
     status('Uploading...'); log('Uploading ' + file.name);
@@ -137,11 +211,12 @@ async function uploadFile(e) {
         log('Raw data loaded'); status('Click Calculate');
     } catch (err) { alert('Error: ' + err); }
 }
+
 async function runCalc() {
     status('Calculating...'); log('Starting Python engine...');
     const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
     const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
-    log('Sending parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
+    log('Parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
     try {
         const res = await fetch('/api/calculate', { 
             method: 'POST',
@@ -151,16 +226,16 @@ async function runCalc() {
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
         log('Complete! Rows: ' + data.summary.total_rows);
-        if (data.parameters) {
-            log('Engine used: actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
-        }
+        if (data.parameters) log('Engine: actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
         Object.entries(data.summary.line_types).forEach(([lt, c]) => log('  ' + lt + ': ' + c));
         await loadResults();
+        await loadValueResults();
         document.getElementById('exportBtn').disabled = false;
         document.getElementById('kpi-lt').textContent = data.summary.line_types_count;
         status('Done - ' + data.summary.total_rows + ' rows');
     } catch (err) { alert('Error: ' + err); }
 }
+
 async function loadResults() {
     const res = await fetch('/api/results'); const data = await res.json();
     state.results = data.results; state.periods = data.periods; state.lineTypes = Object.keys(data.results).sort();
@@ -169,6 +244,140 @@ async function loadResults() {
     state.lineTypes.forEach(lt => { const c = state.results[lt]?.length || 0; if (c > 0) filter.innerHTML += `<option value="${lt}">${lt} (${c})</option>`; });
     updateDashboard(); loadPlanningData(); loadCapacityData(); loadInventoryData();
 }
+
+/* ===== VALUE PLANNING ===== */
+async function loadValueResults() {
+    try {
+        const res = await fetch('/api/value_results');
+        const data = await res.json();
+        if (data.error) { log('Value planning: ' + data.error); return; }
+        state.valueResults = data.results;
+        state.valueLineTypes = Object.keys(data.results).sort();
+        state.consolidation = data.consolidation || [];
+        const filter = document.getElementById('vpLtFilter');
+        filter.innerHTML = '<option value="all">All Line Types</option>';
+        state.valueLineTypes.forEach(lt => {
+            const c = state.valueResults[lt]?.length || 0;
+            if (c > 0) filter.innerHTML += `<option value="${lt}">${lt} (${c})</option>`;
+        });
+        loadValuePlanningData();
+        renderConsolidation();
+        renderFinChart();
+        updateValueKPIs();
+        log('Value planning loaded: ' + state.consolidation.length + ' consolidation rows, ' + Object.values(state.valueResults).flat().length + ' total rows');
+    } catch (err) { log('Value planning error: ' + err); }
+}
+
+function loadValuePlanningData() {
+    const lt = document.getElementById('vpLtFilter').value;
+    const periods = state.periods.slice(0, 8);
+    document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux (Unit Price)</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+    let items = lt === 'all' ? Object.values(state.valueResults).flat() : (state.valueResults[lt] || []);
+    document.getElementById('vpRowCount').textContent = items.length;
+    let html = items.slice(0, 500).map(item => {
+        const isConsol = item.material_number.startsWith('ZZZZZZ_');
+        const cls = isConsol ? 'bg-slate-700/50 font-semibold' : '';
+        return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column ? fmtVal(parseFloat(item.aux_column)) : '-'}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
+    }).join('');
+    document.getElementById('vpBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+}
+
+function filterVPTable() {
+    const s = document.getElementById('vpMatSearch').value.toLowerCase();
+    document.querySelectorAll('#vpBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; });
+}
+
+function updateValueKPIs() {
+    if (!state.consolidation.length) return;
+    const periods = state.periods;
+    const findRow = (name) => state.consolidation.find(r => r.material_number === name);
+    const avgOf = (row) => {
+        if (!row) return 0;
+        let sum = 0, count = 0;
+        periods.forEach(p => { if (row.values[p] !== undefined) { sum += row.values[p]; count++; } });
+        return count > 0 ? sum / count : 0;
+    };
+    document.getElementById('vp-turnover').textContent = fmtVal(avgOf(findRow('ZZZZZZ_TURNOVER')));
+    document.getElementById('vp-ebitda').textContent = fmtVal(avgOf(findRow('ZZZZZZ_EBITDA')));
+    document.getElementById('vp-ebit').textContent = fmtVal(avgOf(findRow('ZZZZZZ_EBIT')));
+    document.getElementById('vp-roce').textContent = (avgOf(findRow('ZZZZZZ_ROCE')) * 100).toFixed(1) + '%';
+}
+
+function renderConsolidation() {
+    if (!state.consolidation.length) return;
+    const periods = state.periods.slice(0, 6);
+    const rowStyles = {
+        'ZZZZZZ_TURNOVER': { cls: 'consol-turnover', label: 'Turnover', color: 'text-green-400', bold: true },
+        'ZZZZZZ_RAW MATERIAL COST': { cls: 'consol-cost', label: 'Raw Material Cost', color: 'text-orange-300' },
+        'ZZZZZZ_MACHINE COST': { cls: 'consol-cost', label: 'Machine Cost', color: 'text-orange-300' },
+        'ZZZZZZ_DIRECT FTE COST': { cls: 'consol-cost', label: 'Direct FTE Cost', color: 'text-orange-300' },
+        'ZZZZZZ_INDIRECT FTE COST': { cls: 'consol-cost', label: 'Indirect FTE Cost', color: 'text-orange-300' },
+        'ZZZZZZ_OVERHEAD COST': { cls: 'consol-cost', label: 'Overhead Cost', color: 'text-orange-300' },
+        'ZZZZZZ_COST OF GOODS': { cls: 'consol-cost consol-separator', label: 'Cost of Goods', color: 'text-orange-400', bold: true },
+        'ZZZZZZ_GROSS MARGIN': { cls: 'consol-margin consol-separator', label: 'Gross Margin', color: 'text-blue-400', bold: true },
+        'ZZZZZZ_SG&A COST': { cls: 'consol-cost', label: 'SG&A Cost', color: 'text-orange-300' },
+        'ZZZZZZ_EBITDA': { cls: 'consol-ebit consol-separator', label: 'EBITDA', color: 'text-yellow-400', bold: true },
+        'ZZZZZZ_D&A COST': { cls: 'consol-cost', label: 'D&A Cost', color: 'text-orange-300' },
+        'ZZZZZZ_EBIT': { cls: 'consol-ebit consol-separator', label: 'EBIT', color: 'text-yellow-300', bold: true },
+        'ZZZZZZ_FIXED ASSETS NET BOOK VALUE': { cls: 'consol-asset', label: 'Fixed Assets NBV', color: 'text-indigo-300' },
+        'ZZZZZZ_INVENTORY VALUE': { cls: 'consol-asset', label: 'Inventory Value', color: 'text-indigo-300' },
+        'ZZZZZZ_RECEIVABLES': { cls: 'consol-asset', label: 'Receivables', color: 'text-indigo-300' },
+        'ZZZZZZ_PAYABLES': { cls: 'consol-asset', label: 'Payables', color: 'text-indigo-300' },
+        'ZZZZZZ_WORKING CAPITAL REQUIREMENTS': { cls: 'consol-asset consol-separator', label: 'Working Capital Req.', color: 'text-indigo-400', bold: true },
+        'ZZZZZZ_CAPITAL INVESTMENT': { cls: 'consol-asset', label: 'Capital Investment', color: 'text-indigo-400', bold: true },
+        'ZZZZZZ_OPERATIONAL CASHFLOW': { cls: 'consol-ebit', label: 'Operational Cashflow', color: 'text-yellow-300' },
+        'ZZZZZZ_ROCE': { cls: 'consol-roce consol-separator', label: 'ROCE', color: 'text-pink-400', bold: true, isPercent: true },
+    };
+    let html = `<table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left p-2 w-48">Metric</th>${periods.map(p => `<th class="text-right p-2">${p}</th>`).join('')}</tr></thead><tbody>`;
+    state.consolidation.forEach(row => {
+        const style = rowStyles[row.material_number] || { cls: '', label: row.material_number.replace('ZZZZZZ_', ''), color: 'text-slate-300' };
+        const fw = style.bold ? 'font-semibold' : '';
+        html += `<tr class="consol-row ${style.cls}"><td class="p-2 ${style.color} ${fw}">${style.label}</td>`;
+        periods.forEach(p => {
+            const v = row.values[p] || 0;
+            const display = style.isPercent ? (v * 100).toFixed(1) + '%' : fmtVal(v);
+            const negCls = v < 0 ? 'text-red-400' : '';
+            html += `<td class="text-right p-2 ${negCls} ${fw}">${display}</td>`;
+        });
+        html += '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('consolDiv').innerHTML = html;
+}
+
+function renderFinChart() {
+    if (!state.consolidation.length) return;
+    const periods = state.periods.slice(0, 12);
+    const findRow = (name) => state.consolidation.find(r => r.material_number === name);
+    const getValues = (name) => { const row = findRow(name); return periods.map(p => row ? (row.values[p] || 0) : 0); };
+    const ctx = document.getElementById('finChart').getContext('2d');
+    if (finChart) finChart.destroy();
+    finChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: periods,
+            datasets: [
+                { label: 'Turnover', data: getValues('ZZZZZZ_TURNOVER'), backgroundColor: 'rgba(34, 197, 94, 0.4)', borderColor: '#22c55e', borderWidth: 1, order: 2 },
+                { label: 'Cost of Goods', data: getValues('ZZZZZZ_COST OF GOODS'), backgroundColor: 'rgba(249, 115, 22, 0.4)', borderColor: '#f97316', borderWidth: 1, order: 2 },
+                { label: 'EBITDA', data: getValues('ZZZZZZ_EBITDA'), backgroundColor: 'rgba(234, 179, 8, 0.4)', borderColor: '#eab308', borderWidth: 1, order: 2 },
+                { label: 'EBIT', type: 'line', data: getValues('ZZZZZZ_EBIT'), borderColor: '#3b82f6', borderWidth: 2, tension: 0.3, pointRadius: 3, yAxisID: 'y', order: 1 },
+                { label: 'ROCE %', type: 'line', data: getValues('ZZZZZZ_ROCE').map(v => v * 100), borderColor: '#ec4899', borderWidth: 2, tension: 0.3, pointRadius: 3, borderDash: [5, 5], yAxisID: 'y2', order: 0 },
+            ]
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 10 } } } },
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => fmtVal(v) } },
+                y2: { position: 'right', grid: { display: false }, ticks: { color: '#ec4899', callback: v => v.toFixed(0) + '%' }, min: 0, max: 30 },
+                x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8', maxRotation: 45 } }
+            }
+        }
+    });
+}
+/* ===== END VALUE PLANNING ===== */
+
 function updateDashboard() {
     let html = '<table class="w-full"><tr class="text-slate-400"><th class="text-left p-2">Line Type</th><th class="text-right p-2">Count</th></tr>';
     state.lineTypes.forEach(lt => { html += `<tr><td class="p-2">${lt}</td><td class="text-right p-2">${state.results[lt]?.length || 0}</td></tr>`; });
@@ -221,6 +430,14 @@ async function loadInventoryData() {
 }
 function exportData() { window.location.href = '/api/export'; }
 function fmt(n) { if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return n.toFixed(n % 1 === 0 ? 0 : 1); }
+function fmtVal(n) {
+    if (n === 0 || n === undefined || n === null) return '0';
+    const abs = Math.abs(n);
+    const sign = n < 0 ? '-' : '';
+    if (abs >= 1e6) return sign + (abs / 1e6).toFixed(1) + 'M';
+    if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + 'K';
+    return sign + abs.toFixed(abs < 10 ? 2 : 0);
+}
 </script>
 </body>
 </html>
