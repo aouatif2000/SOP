@@ -271,13 +271,20 @@ async function loadValueResults() {
 function loadValuePlanningData() {
     const lt = document.getElementById('vpLtFilter').value;
     const periods = state.periods.slice(0, 8);
-    document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux (Unit Price)</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+    document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.valueResults).flat() : (state.valueResults[lt] || []);
+    // Sort items by material number in ascending order
+    items.sort((a, b) => {
+        const aNum = parseInt(a.material_number.replace(/\D/g, '')) || 0;
+        const bNum = parseInt(b.material_number.replace(/\D/g, '')) || 0;
+        return aNum - bNum;
+    });
     document.getElementById('vpRowCount').textContent = items.length;
     let html = items.slice(0, 500).map(item => {
         const isConsol = item.material_number.startsWith('ZZZZZZ_');
         const cls = isConsol ? 'bg-slate-700/50 font-semibold' : '';
-        return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column ? fmtVal(parseFloat(item.aux_column)) : '-'}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
+        const auxVal = item.aux_column != null ? (isNaN(Number(item.aux_column)) ? item.aux_column : fmtVal(Number(item.aux_column))) : '-';
+        return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${auxVal}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
     }).join('');
     document.getElementById('vpBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
 }
@@ -402,6 +409,12 @@ function loadPlanningData() {
     const periods = state.periods.slice(0, 8);
     document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
+    // Sort items by material number in ascending order
+    items.sort((a, b) => {
+        const aNum = parseInt(a.material_number.replace(/\D/g, '')) || 0;
+        const bNum = parseInt(b.material_number.replace(/\D/g, '')) || 0;
+        return aNum - bNum;
+    });
     document.getElementById('rowCount').textContent = items.length;
     let html = items.slice(0, 500).map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400">${item.aux_2_column || '-'}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
     document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';

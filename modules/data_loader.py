@@ -311,14 +311,17 @@ class DataLoader:
             total_qty = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
             total_value = float(row.get('Total Value', 0)) if pd.notna(row.get('Total Value')) else 0
             total_stock_qty = float(row.get('Total Stock', 0)) if pd.notna(row.get('Total Stock')) else 0
+            # VBA ValueStartStockLevel uses column 17 = "Value of Unrestricted Stock"
+            value_unrestricted = float(row.get('Value of Unrestricted Stock', 0)) if pd.notna(row.get('Value of Unrestricted Stock')) else 0
             
             self.stock_levels[mat] = self.stock_levels.get(mat, 0) + total_qty
             
             # Store both quantity and value for inventory valuation
             if mat not in self.stock:
-                self.stock[mat] = {'Total Stock': 0, 'Total Value': 0}
+                self.stock[mat] = {'Total Stock': 0, 'Total Value': 0, 'Value Unrestricted': 0}
             self.stock[mat]['Total Stock'] += total_stock_qty
             self.stock[mat]['Total Value'] += total_value
+            self.stock[mat]['Value Unrestricted'] += value_unrestricted
             
         print(f"  Stock levels: {len(self.stock_levels)}")
 
@@ -399,42 +402,64 @@ class DataLoader:
         return max(self.bom_levels.values()) if self.bom_levels else 0
 
     def _load_avg_sales_price(self):
-        """Load average sales price data."""
+        """Load average sales price data.
+        
+        VBA logic: For each material, SUM volume and ExWorksRevenue across ALL rows
+        where material AND site match, then price = totalRevenue / totalVolume.
+        """
         sheet_name = 'Average sales price'
         if sheet_name not in self.wb.sheetnames:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
-        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        df = pd.read_excel(self.excel_file, sheet_name=sheet_name)
+        site = self.config.site if self.config else None
         
-        # Map product IDs to SalesPriceItem
+        # Accumulate volume and revenue per product
+        accum = {}  # product_id -> {volume, revenue, plant_code}
         for _, row in df.iterrows():
             product_id = str(row.get('ProductId', '')).strip()
-            if product_id and pd.notna(row.get('Volume 2025 (t)')):
+            plant_code = str(row.get('PlantCode', '')).strip() if pd.notna(row.get('PlantCode')) else ''
+            if not product_id or product_id == 'nan':
+                continue
+            if site and plant_code and plant_code != site:
+                continue
+            vol = float(row.get('Volume 2025 (t)', 0)) if pd.notna(row.get('Volume 2025 (t)')) else 0
+            rev = float(row.get('ExWorksRevenue', 0)) if pd.notna(row.get('ExWorksRevenue')) else 0
+            if product_id not in accum:
+                accum[product_id] = {'volume': 0, 'revenue': 0, 'plant_code': plant_code}
+            accum[product_id]['volume'] += vol
+            accum[product_id]['revenue'] += rev
+        
+        for product_id, data in accum.items():
+            if data['volume'] > 0:
                 self.sales_prices[product_id] = SalesPriceItem(
-                    plant_code=str(row.get('PlantCode', '')),
+                    plant_code=data['plant_code'],
                     product_id=product_id,
-                    volume_2025=float(row.get('Volume 2025 (t)', 0)),
-                    ex_works_revenue=float(row.get('ExWorksRevenue', 0))
+                    volume_2025=data['volume'],
+                    ex_works_revenue=data['revenue']
                 )
         
         print(f"  Loaded {len(self.sales_prices)} sales price items")
 
     def _load_cost_raw_material(self):
-        """Load raw material costs."""
+        """Load raw material costs, filtered by site."""
         sheet_name = 'Cost raw material'
         if sheet_name not in self.wb.sheetnames:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
-        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        df = pd.read_excel(self.excel_file, sheet_name=sheet_name)
+        site = self.config.site if self.config else None
         
-        # Map material codes to cost per unit
         for _, row in df.iterrows():
             material = str(row.get('Product Code', '')).strip()
+            plant_code = str(row.get('Plant Code', '')).strip() if pd.notna(row.get('Plant Code')) else ''
+            if site and plant_code and plant_code != site:
+                continue
             if material and pd.notna(row.get('Cost Per Unit')):
                 self.material_costs[material] = RawMaterialCost(
-                    plant_code=str(row.get('Plant Code', '')),
+                    plant_code=plant_code,
                     product_code=material,
                     product_name=str(row.get('Product Name', '')),
                     cost_per_unit=float(row.get('Cost Per Unit', 0))
@@ -443,25 +468,38 @@ class DataLoader:
         print(f"  Loaded {len(self.material_costs)} raw material costs")
 
     def _load_cost_machine_hour(self):
-        """Load machine hour costs (variable costs only - Activity Type 50)."""
+        """Load machine hour costs (Fixed price for Activity Type 'Machine Variable').
+        
+        VBA logic: CostMHClmn = 7 (Fxd Prices in OCrcy), CostMHActType = 6 (Act. type short text),
+        matches where Act. type short text = 'Machine Variable' AND site matches.
+        Key = first 5 chars of Cost Center (e.g. 'PBA11' from 'PBA11-NLX1').
+        """
         sheet_name = 'Cost machine hour'
         if sheet_name not in self.wb.sheetnames:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
-        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        df = pd.read_excel(self.excel_file, sheet_name=sheet_name)
         
-        # Map cost centers to variable cost per hour
+        site = self.config.site if self.config else None
+        
         for _, row in df.iterrows():
-            activity_type = row.get('Activity Type', '')
-            # Only get variable costs (Activity Type 50)
-            if str(activity_type) == '50':
-                cost_center = str(row.get('Cost Center', '')).strip()[:5]  # First 5 digits
-                if cost_center and pd.notna(row.get('Vbl. price in OCrcy')):
+            act_type_text = str(row.get('Act. type short text', '')).strip()
+            plant_code = str(row.get('Plant Code', '')).strip() if pd.notna(row.get('Plant Code')) else ''
+            
+            # VBA: CostMHActType checks "Machine Variable" string
+            if act_type_text == 'Machine Variable':
+                if site and plant_code and plant_code != site:
+                    continue
+                cost_center_full = str(row.get('Cost Center', '')).strip()
+                cost_center = cost_center_full[:5]  # First 5 chars (e.g. PBA11)
+                # VBA: CostMHClmn = 7 = "Fxd Prices in OCrcy"
+                fxd_price = float(row.get('Fxd Prices in OCrcy', 0)) if pd.notna(row.get('Fxd Prices in OCrcy')) else 0
+                if cost_center and fxd_price != 0:
                     self.machine_costs[cost_center] = MachineCost(
-                        plant_code=str(row.get('Plant Code', '')),
+                        plant_code=plant_code,
                         cost_center=cost_center,
-                        variable_cost_per_hour=float(row.get('Vbl. price in OCrcy', 0))
+                        variable_cost_per_hour=fxd_price  # Actually fixed price per VBA
                     )
         
         print(f"  Loaded {len(self.machine_costs)} machine costs")
@@ -473,7 +511,7 @@ class DataLoader:
             print(f"  Warning: '{sheet_name}' sheet not found")
             return
         
-        df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+        df = pd.read_excel(self.excel_file, sheet_name=sheet_name)
         
         # Extract values by cost number
         params = {}
