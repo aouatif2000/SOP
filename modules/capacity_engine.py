@@ -109,11 +109,18 @@ class CapacityEngine:
                     ))
 
         # 2. Machine-level aggregation rows (Z_MACHxx)
+        # VBA: machine hours = sum(material hours) / OEE
+        # OEE < 1 means the machine needs MORE hours than pure production time
         for mc_code, machine in self.data.machines.items():
             mid = machine.machine_id
             group = machine.machine_group
             oee = machine.oee
-            hours = self.machine_hours_used.get(mc_code, {p: 0.0 for p in self.periods})
+            raw_hours = self.machine_hours_used.get(mc_code, {p: 0.0 for p in self.periods})
+            # Divide by OEE: actual machine occupation = production hours / OEE
+            machine_values = {}
+            for p in self.periods:
+                h = raw_hours.get(p, 0.0)
+                machine_values[p] = h / oee if oee > 0 and h > 0 else h
             self.rows_07_cap.append(PlanningRow(
                 material_number=mid,
                 material_name=mc_code,
@@ -122,16 +129,26 @@ class CapacityEngine:
                 line_type=LineType.CAPACITY_UTILIZATION.value,
                 aux_column=group if group else None,
                 aux_2_column=str(oee),
-                values=dict(hours)
+                values=machine_values
             ))
 
-        # 3. Group-level aggregation rows
+        # 3. Group-level aggregation rows (sum of OEE-adjusted machine hours)
+        # Build OEE-adjusted hours per machine for reuse
+        self.machine_hours_oee_adjusted: Dict[str, Dict[str, float]] = {}
+        for mc_code, machine in self.data.machines.items():
+            oee = machine.oee
+            raw = self.machine_hours_used.get(mc_code, {p: 0.0 for p in self.periods})
+            self.machine_hours_oee_adjusted[mc_code] = {
+                p: (raw.get(p, 0.0) / oee if oee > 0 and raw.get(p, 0.0) > 0 else raw.get(p, 0.0))
+                for p in self.periods
+            }
+
         group_hours = defaultdict(lambda: {p: 0.0 for p in self.periods})
         for mc_code, machine in self.data.machines.items():
             grp = machine.machine_group
             if grp:
                 for p in self.periods:
-                    group_hours[grp][p] += self.machine_hours_used.get(mc_code, {}).get(p, 0.0)
+                    group_hours[grp][p] += self.machine_hours_oee_adjusted[mc_code].get(p, 0.0)
 
         for grp_id in self.all_groups:
             hours = group_hours.get(grp_id, {p: 0.0 for p in self.periods})
@@ -265,7 +282,7 @@ class CapacityEngine:
         base_shift_hours = 520.0
         for machine_code, machine in self.data.machines.items():
             rate_data = {}
-            used = self.machine_hours_used.get(machine_code, {})
+            used = self.machine_hours_oee_adjusted.get(machine_code, {})
             for period in self.periods:
                 if machine.shift_system == ShiftSystem.UNLIMITED:
                     rate_data[period] = 1.0

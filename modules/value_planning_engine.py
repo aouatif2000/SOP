@@ -132,10 +132,9 @@ class ValuePlanningEngine:
         converted = 0
         for row in rows:
             sp = self.data.sales_prices.get(row.material_number)
-            if not sp or sp.price_per_unit == 0:
-                continue
-            vr = self._make_value_row(row, LineType.DEMAND_FORECAST.value,
-                                      sp.price_per_unit)
+            # VBA: =IFERROR(AUX1 * volume, 0) — row always included, 0 if no price
+            price = sp.price_per_unit if sp and sp.price_per_unit != 0 else 0
+            vr = self._make_value_row(row, LineType.DEMAND_FORECAST.value, price)
             self.value_results[LineType.DEMAND_FORECAST.value].append(vr)
             self._accum('turnover', vr)
             converted += 1
@@ -161,10 +160,8 @@ class ValuePlanningEngine:
             if row.material_number not in self._purchase_plan_materials:
                 continue
             mc = self.data.material_costs.get(row.material_number)
-            if not mc or mc.cost_per_unit == 0:
-                continue
-
-            unit_cost = mc.cost_per_unit
+            # VBA: =IFERROR(AUX1 * volume, 0) — row always included, 0 if no cost
+            unit_cost = mc.cost_per_unit if mc else 0
 
             # VBA: PurchasedAndProducedMaterials special case
             # value = aux * volume * (1 - produced_ratio)
@@ -226,9 +223,8 @@ class ValuePlanningEngine:
         converted = 0
         for row in rows:
             uc = self._get_inventory_unit_cost(row.material_number)
-            if uc == 0:
-                continue
             ss_value = self._get_starting_stock_value(row.material_number)
+            # VBA: always include, IFERROR → 0 if no cost
             vr = self._make_value_row(row, LineType.INVENTORY.value, uc,
                                       starting_stock_value=ss_value)
             self.value_results[LineType.INVENTORY.value].append(vr)
@@ -246,10 +242,9 @@ class ValuePlanningEngine:
         converted = 0
         for row in rows:
             mc = self.data.material_costs.get(row.material_number)
-            if not mc or mc.cost_per_unit == 0:
-                continue
-            vr = self._make_value_row(row, LineType.PURCHASE_RECEIPT.value,
-                                      mc.cost_per_unit)
+            # VBA: always include, IFERROR → 0 if no cost
+            cost = mc.cost_per_unit if mc else 0
+            vr = self._make_value_row(row, LineType.PURCHASE_RECEIPT.value, cost)
             self.value_results[LineType.PURCHASE_RECEIPT.value].append(vr)
             self._accum('purchase_receipt', vr)
             converted += 1

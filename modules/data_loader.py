@@ -420,8 +420,8 @@ class DataLoader:
                 continue
             if site and plant_code and plant_code != site:
                 continue
-            vol = float(row.get('Volume 2025 (t)', 0)) if pd.notna(row.get('Volume 2025 (t)')) else 0
-            rev = float(row.get('ExWorksRevenue', 0)) if pd.notna(row.get('ExWorksRevenue')) else 0
+            vol = float(row.get('Volume 2025', 0)) if pd.notna(row.get('Volume 2025')) else 0
+            rev = float(row.get('ExWorks Revenue', 0)) if pd.notna(row.get('ExWorks Revenue')) else 0
             if product_id not in accum:
                 accum[product_id] = {'volume': 0, 'revenue': 0, 'plant_code': plant_code}
             accum[product_id]['volume'] += vol
