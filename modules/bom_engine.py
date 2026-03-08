@@ -20,12 +20,12 @@ class BOMEngine:
         self.data = data
         self.periods = data.periods
         # Parent -> list of (child, qty_per) from BOM
+        # Include coproducts — they have NEGATIVE qty_per, creating negative dependent demand
         self.parent_children: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
         for b in data.bom:
-            if not b.is_coproduct:
-                self.parent_children[b.parent_material].append(
-                    (b.component_material, b.quantity_per)
-                )
+            self.parent_children[b.parent_material].append(
+                (b.component_material, b.quantity_per)
+            )
 
     def get_max_level(self) -> int:
         return self.data.get_max_bom_level()
@@ -104,7 +104,7 @@ class BOMEngine:
             # Find qty_per for this child from BOM
             qty_per = None
             for b in self.data.bom:
-                if b.parent_material == parent_mat and b.component_material == child_mat and not b.is_coproduct:
+                if b.parent_material == parent_mat and b.component_material == child_mat:
                     qty_per = b.quantity_per
                     break
 

@@ -200,7 +200,7 @@ class DataLoader:
                 plant=str(row.get('Plant', '')),
                 parent_material=parent, parent_name=str(row.get('Material Name', '')),
                 component_material=component, component_name=str(row.get('Component Description', '')),
-                quantity_per=abs(qty_per), bom_header_quantity=float(header_qty),
+                quantity_per=qty_per, bom_header_quantity=float(header_qty),
                 is_coproduct=is_coproduct,
                 production_version=str(row.get('PV', '')) if pd.notna(row.get('PV')) else None
             ))
@@ -359,8 +359,8 @@ class DataLoader:
         child_to_parents = defaultdict(set)
         all_mats = set()
         for b in self.bom:
-            if b.is_coproduct:
-                continue
+            # Include ALL BOM entries (including coproducts) for level calculation
+            # Coproducts are children too — they need a level to receive dependent demand
             parent_to_children[b.parent_material].add(b.component_material)
             child_to_parents[b.component_material].add(b.parent_material)
             all_mats.add(b.parent_material)
