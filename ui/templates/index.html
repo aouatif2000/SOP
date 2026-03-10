@@ -28,6 +28,10 @@
         .consol-asset { border-left: 3px solid #6366f1; }
         .consol-roce { border-left: 3px solid #ec4899; }
         .consol-separator { border-top: 2px solid rgba(255,255,255,0.2); }
+        .cell-edited { background: rgba(255, 235, 59, 0.25) !important; }
+        .cell-increased { background: rgba(200, 230, 201, 0.35) !important; font-weight: 700; }
+        .cell-decreased { background: rgba(255, 205, 210, 0.35) !important; font-weight: 700; }
+        .edit-mode-active { outline: 2px solid #FFEB3B; }
     </style>
 </head>
 <body class="text-gray-100">
@@ -50,6 +54,7 @@
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
+                <input type="file" id="editsFileInput" accept=".json" class="hidden" onchange="loadEditsJSON(event)">
             </div>
         </div>
     </header>
@@ -86,7 +91,12 @@
             <div class="card rounded-xl p-6">
                 <div class="flex justify-between mb-4 flex-wrap gap-2">
                     <h3 class="font-semibold">Planning Results (Python Calculated)</h3>
-                    <div class="flex gap-2">
+                    <div class="flex gap-2 flex-wrap items-center">
+                        <button id="editModeBtn" onclick="toggleEditMode()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">Edit Volumes</button>
+                        <button onclick="resetAllEdits()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">&#8634; Reset All Edits</button>
+                        <span id="editBadge" class="bg-yellow-600 text-white text-xs px-2 py-0.5 rounded-full" style="display:none">0</span>
+                        <button onclick="saveEditsJSON()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">Save Edits JSON</button>
+                        <label class="cursor-pointer px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500" for="editsFileInput">Load Edits JSON</label>
                         <select id="ltFilter" onchange="loadPlanningData()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
                         <input id="matSearch" onkeyup="filterTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
                     </div>
@@ -181,7 +191,7 @@
         <span id="status" class="text-slate-400">Ready</span>
     </footer>
 <script>
-let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [] };
+let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], editMode: false, cellEdits: {} };
 let utilChart = null;
 let finChart = null;
 
@@ -214,6 +224,12 @@ async function uploadFile(e) {
 
 async function runCalc() {
     status('Calculating...'); log('Starting Python engine...');
+    // Reset client-side edit state before a fresh calculation
+    state.cellEdits = {};
+    state.editMode = false;
+    const editBtn = document.getElementById('editModeBtn');
+    if (editBtn) { editBtn.textContent = 'Edit Volumes'; editBtn.classList.remove('edit-mode-active','text-yellow-300'); }
+    updateEditBadge();
     const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
     const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
     log('Parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
@@ -269,6 +285,7 @@ async function loadValueResults() {
 }
 
 function loadValuePlanningData() {
+    if (!state.valueResults) return;
     const lt = document.getElementById('vpLtFilter').value;
     const periods = state.periods.slice(0, 8);
     document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2 Column</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
@@ -399,14 +416,186 @@ async function loadUtilChart() {
         document.getElementById('kpi-util').textContent = count > 0 ? (total / count).toFixed(1) + '%' : '0%';
     } catch (err) { log('Chart error: ' + err); }
 }
+const EDITABLE_LINE_TYPES = ['01. Demand forecast', '06. Production plan', '06. Purchase receipt'];
+
 function loadPlanningData() {
+    if (!state.results) return;
     const lt = document.getElementById('ltFilter').value;
     const periods = state.periods.slice(0, 8);
     document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
     document.getElementById('rowCount').textContent = items.length;
-    let html = items.slice(0, 500).map(item => `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400">${item.aux_2_column || '-'}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`).join('');
+    const isEditable = (lineType) => state.editMode && EDITABLE_LINE_TYPES.includes(lineType);
+    let html = items.slice(0, 500).map(item => {
+        const periodCells = periods.map(p => {
+            const key = `${item.line_type}||${item.material_number}||${p}`;
+            const edit = state.cellEdits[key];
+            const val = item.values[p] || 0;
+            let cls = 'text-right';
+            let indicator = '';
+            let tooltip = '';
+            if (edit) {
+                if (edit.new > edit.original) { cls += ' cell-increased'; indicator = ' &#9650;'; }
+                else if (edit.new < edit.original) { cls += ' cell-decreased'; indicator = ' &#9660;'; }
+                else { cls += ' cell-edited'; }
+                tooltip = ` title="Original: ${edit.original}\nNew: ${edit.new}\nDelta: ${edit.delta_pct}%"`;
+            }
+            if (isEditable(item.line_type)) {
+                const esc = (s) => String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+                return `<td class="${cls}" data-key="${esc(key)}" data-matnum="${esc(item.material_number)}" data-lt="${esc(item.line_type)}" data-period="${esc(p)}" ondblclick="startCellEdit(this)" style="cursor:pointer"${tooltip}>${fmt(val)}${indicator}</td>`;
+            }
+            return `<td class="${cls}"${tooltip}>${fmt(val)}${indicator}</td>`;
+        }).join('');
+        return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400">${item.aux_2_column || '-'}</td>${periodCells}</tr>`;
+    }).join('');
     document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+}
+
+function toggleEditMode() {
+    state.editMode = !state.editMode;
+    const btn = document.getElementById('editModeBtn');
+    if (btn) {
+        btn.textContent = state.editMode ? 'Editing ON' : '\u270F\uFE0F Edit Volumes';
+        btn.classList.toggle('edit-mode-active', state.editMode);
+        btn.classList.toggle('text-yellow-300', state.editMode);
+    }
+    loadPlanningData();
+}
+
+function startCellEdit(cell) {
+    if (!state.editMode) return;
+    const matNum = cell.dataset.matnum;
+    const lt = cell.dataset.lt;
+    const period = cell.dataset.period;
+    const key = cell.dataset.key;
+    const rows = state.results[lt] || [];
+    const row = rows.find(r => r.material_number === matNum);
+    const rawVal = row ? (row.values[period] || 0) : 0;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = rawVal;
+    input.className = 'w-full bg-blue-900 text-white text-right rounded px-1 border border-blue-400 text-xs';
+    input.style.minWidth = '70px';
+    let done = false;
+    function doCommit() { if (done) return; done = true; commitCellEdit(cell, input, matNum, lt, period, key, rawVal); }
+    function doCancel() { if (done) return; done = true; cancelCellEdit(cell, rawVal, key); }
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); doCommit(); }
+        if (e.key === 'Escape') { e.preventDefault(); doCancel(); }
+    });
+    input.addEventListener('blur', doCommit);
+    cell.innerHTML = '';
+    cell.appendChild(input);
+    input.focus();
+    input.select();
+}
+
+async function commitCellEdit(cell, input, matNum, lt, period, key, rawVal) {
+    const newValue = parseFloat(input.value);
+    if (isNaN(newValue)) { cancelCellEdit(cell, rawVal, key); return; }
+    try {
+        const res = await fetch('/api/update_volume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ line_type: lt, material_number: matNum, period, new_value: newValue })
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); cancelCellEdit(cell, rawVal, key); return; }
+        state.results = data.results;
+        state.valueResults = data.value_results;
+        state.consolidation = data.consolidation;
+        state.cellEdits[key] = { original: data.edit_meta.old_value, new: data.edit_meta.new_value, delta_pct: data.edit_meta.delta_pct };
+        refreshAllTabs();
+    } catch (err) { alert('Error: ' + err); cancelCellEdit(cell, rawVal, key); }
+}
+
+function cancelCellEdit(cell, rawVal, key) {
+    const edit = state.cellEdits[key];
+    let cls = 'text-right';
+    let indicator = '';
+    if (edit) {
+        if (edit.new > edit.original) { cls += ' cell-increased'; indicator = ' &#9650;'; }
+        else if (edit.new < edit.original) { cls += ' cell-decreased'; indicator = ' &#9660;'; }
+        else { cls += ' cell-edited'; }
+    }
+    cell.className = cls;
+    cell.innerHTML = fmt(rawVal) + indicator;
+}
+
+function refreshAllTabs() {
+    if (!state.results) return;
+    loadPlanningData();
+    if (state.valueResults) {
+        loadValuePlanningData();
+        renderConsolidation();
+        renderFinChart();
+        updateValueKPIs();
+    }
+    loadCapacityData();
+    loadInventoryData();
+    updateEditBadge();
+}
+
+function updateEditBadge() {
+    const count = Object.keys(state.cellEdits).length;
+    const badge = document.getElementById('editBadge');
+    if (badge) { badge.textContent = count; badge.style.display = count > 0 ? '' : 'none'; }
+    const exportBtn = document.getElementById('exportBtn');
+    if (exportBtn) {
+        exportBtn.textContent = count > 0 ? `Export with Edits (${count})` : 'Export';
+        exportBtn.style.border = count > 0 ? '2px solid #FFEB3B' : '';
+    }
+}
+
+function saveEditsJSON() { window.location.href = '/api/edits/export'; }
+
+async function loadEditsJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (e) { alert('Invalid JSON file'); return; }
+    event.target.value = '';
+    try {
+        const res = await fetch('/api/edits/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: text
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        state.results = data.results;
+        state.valueResults = data.value_results;
+        state.consolidation = data.consolidation;
+        // Re-populate cellEdits from manual_edits in the returned results
+        state.cellEdits = {};
+        for (const [lt, rows] of Object.entries(state.results)) {
+            for (const row of rows) {
+                if (row.manual_edits && Object.keys(row.manual_edits).length > 0) {
+                    for (const [p, editData] of Object.entries(row.manual_edits)) {
+                        const key = `${row.line_type}||${row.material_number}||${p}`;
+                        const orig = editData.original;
+                        const nv = editData.new;
+                        const dp = orig !== 0 ? parseFloat(((nv - orig) / Math.abs(orig) * 100).toFixed(2)) : 0;
+                        state.cellEdits[key] = { original: orig, new: nv, delta_pct: dp };
+                    }
+                }
+            }
+        }
+        refreshAllTabs();
+        log('Edits JSON loaded: ' + (parsed.edits ? parsed.edits.length : 0) + ' edits applied');
+    } catch (err) { alert('Import error: ' + err); }
+}
+
+function resetAllEdits() {
+    if (!current_engine_loaded()) return;
+    state.cellEdits = {};
+    updateEditBadge();
+    runCalc();
+}
+
+function current_engine_loaded() {
+    return state.results !== null;
 }
 function filterTable() { const s = document.getElementById('matSearch').value.toLowerCase(); document.querySelectorAll('#planBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; }); }
 async function loadCapacityData() {
@@ -431,6 +620,7 @@ async function loadInventoryData() {
     } catch (err) { log('Error: ' + err); }
 }
 function exportData() { window.location.href = '/api/export'; }
+
 function fmt(n) { if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return n.toFixed(n % 1 === 0 ? 0 : 1); }
 function fmtVal(n) {
     if (n === 0 || n === undefined || n === null) return '0';

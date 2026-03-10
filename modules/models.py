@@ -197,7 +197,8 @@ class PlanningRow:
     aux_2_column: Optional[str] = None
     starting_stock: float = 0.0
     values: Dict[str, float] = field(default_factory=dict)
-    
+    manual_edits: Dict = field(default_factory=dict)  # { period: { original: float, new: float } }
+
     def get_value(self, period: str) -> float:
         return self.values.get(period, 0.0)
     
@@ -218,6 +219,7 @@ class PlanningRow:
             'aux_2_column': self.aux_2_column,
             'starting_stock': self.starting_stock,
             'values': self.values,
+            'manual_edits': self.manual_edits,
         }
 
 

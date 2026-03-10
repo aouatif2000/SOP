@@ -5,10 +5,13 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import sys
+import io
+import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from modules.planning_engine import PlanningEngine
+from modules.models import LineType
 
 app = Flask(__name__, 
             template_folder=str(Path(__file__).parent / 'templates'),
@@ -228,17 +231,241 @@ def get_inventory():
 @app.route('/api/export')
 def export():
     global current_engine
-    
+
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
-    
+
     export_dir = Path(__file__).parent.parent / 'exports'
     export_dir.mkdir(exist_ok=True)
-    
+
     export_path = export_dir / f'SOP_Python_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
     current_engine.to_excel_with_values(str(export_path))
-    
+
+    # Apply edit highlights and summary sheet if there are any edits
+    _apply_edit_highlights(str(export_path), current_engine)
+
     return send_file(str(export_path), as_attachment=True)
+
+
+def _apply_edit_highlights(path: str, engine):
+    """Open the exported workbook and apply edit highlights + summary sheet."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.comments import Comment
+
+    # Collect all edits
+    all_edits = []
+    for lt, rows in engine.results.items():
+        for row in rows:
+            if row.manual_edits:
+                for period, edit_data in row.manual_edits.items():
+                    original = edit_data.get('original', 0.0)
+                    new_val = edit_data.get('new', 0.0)
+                    delta_pct = round((new_val - original) / abs(original) * 100, 2) if original != 0 else 0.0
+                    all_edits.append({
+                        'line_type': row.line_type,
+                        'material_number': row.material_number,
+                        'material_name': row.material_name,
+                        'period': period,
+                        'original': original,
+                        'new': new_val,
+                        'delta_pct': delta_pct,
+                    })
+
+    if not all_edits:
+        return
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb['Planning sheet']
+
+    # Build column lookups from header row
+    header = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    period_col = {}
+    mat_col_idx = None
+    lt_col_idx = None
+    for i, val in enumerate(header, start=1):
+        if val is None:
+            continue
+        s = str(val)
+        period_col[s] = i
+        if s == 'Material number':
+            mat_col_idx = i
+        elif s == 'Line type':
+            lt_col_idx = i
+
+    # Build row lookup: (material_number, line_type) -> row_idx
+    row_lookup = {}
+    if mat_col_idx and lt_col_idx:
+        for row_idx, row_data in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            mat_val = row_data[mat_col_idx - 1]
+            lt_val = row_data[lt_col_idx - 1]
+            if mat_val and lt_val:
+                row_lookup[(str(mat_val), str(lt_val))] = row_idx
+
+    # Fill styles
+    yellow_fill = PatternFill(start_color='FFEB3B', end_color='FFEB3B', fill_type='solid')
+    green_fill = PatternFill(start_color='C8E6C9', end_color='C8E6C9', fill_type='solid')
+    red_fill = PatternFill(start_color='FFCDD2', end_color='FFCDD2', fill_type='solid')
+    bold_font = Font(bold=True)
+
+    for edit in all_edits:
+        row_idx = row_lookup.get((edit['material_number'], edit['line_type']))
+        col_idx = period_col.get(edit['period'])
+        if row_idx is None or col_idx is None:
+            continue
+        cell = ws.cell(row=row_idx, column=col_idx)
+        original = edit['original']
+        new_val = edit['new']
+        delta_pct = edit['delta_pct']
+        if new_val > original:
+            cell.fill = green_fill
+            cell.font = bold_font
+        elif new_val < original:
+            cell.fill = red_fill
+            cell.font = bold_font
+        else:
+            cell.fill = yellow_fill
+        cell.comment = Comment(f"Original: {original}\nNew: {new_val}\nDelta: {delta_pct}%", 'SOP Engine')
+
+    # Edits Summary sheet
+    if 'Edits Summary' in wb.sheetnames:
+        del wb['Edits Summary']
+    ws_edits = wb.create_sheet('Edits Summary')
+    ws_edits.append(['Line Type', 'Material Number', 'Material Name', 'Period',
+                     'Original Value', 'New Value', 'Delta %'])
+    for edit in all_edits:
+        ws_edits.append([edit['line_type'], edit['material_number'], edit['material_name'],
+                         edit['period'], edit['original'], edit['new'], edit['delta_pct']])
+
+    wb.save(path)
+
+
+@app.route('/api/update_volume', methods=['POST'])
+def update_volume():
+    global current_engine
+
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON body'}), 400
+
+    line_type = data.get('line_type')
+    material_number = data.get('material_number')
+    period = data.get('period')
+    new_value = float(data.get('new_value', 0))
+
+    rows = current_engine.results.get(line_type, [])
+    target_row = next((r for r in rows if r.material_number == material_number), None)
+    if target_row is None:
+        return jsonify({'error': 'Row not found'}), 404
+
+    old_value = target_row.get_value(period)
+
+    # Preserve the very first original value
+    if period not in target_row.manual_edits:
+        target_row.manual_edits[period] = {'original': old_value, 'new': new_value}
+    else:
+        target_row.manual_edits[period]['new'] = new_value
+
+    target_row.set_value(period, new_value)
+
+    # Re-run value planning with updated volumes
+    from modules.value_planning_engine import ValuePlanningEngine
+    current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+    current_engine.value_results = current_engine.value_engine.calculate()
+
+    delta_pct = round((new_value - old_value) / abs(old_value) * 100, 2) if old_value != 0 else 0.0
+
+    results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+    value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+    consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+
+    return jsonify({
+        'success': True,
+        'results': results_dict,
+        'value_results': value_results_dict,
+        'consolidation': consolidation,
+        'edit_meta': {'old_value': old_value, 'new_value': new_value, 'delta_pct': delta_pct},
+    })
+
+
+@app.route('/api/edits/export')
+def export_edits():
+    global current_engine
+
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    edits = []
+    for lt, rows in current_engine.results.items():
+        for row in rows:
+            if row.manual_edits:
+                for period, edit_data in row.manual_edits.items():
+                    original = edit_data.get('original', 0.0)
+                    new_val = edit_data.get('new', 0.0)
+                    delta_pct = round((new_val - original) / abs(original) * 100, 2) if original != 0 else 0.0
+                    edits.append({
+                        'line_type': row.line_type,
+                        'material_number': row.material_number,
+                        'period': period,
+                        'original': original,
+                        'new': new_val,
+                        'delta_pct': delta_pct,
+                    })
+
+    export_data = {'exported_at': datetime.now().isoformat(), 'edits': edits}
+    buf = io.BytesIO(json.dumps(export_data, indent=2).encode('utf-8'))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/json', as_attachment=True,
+                     download_name='edits.json')
+
+
+@app.route('/api/edits/import', methods=['POST'])
+def import_edits():
+    global current_engine
+
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON body'}), 400
+
+        edits = data.get('edits', [])
+        for edit in edits:
+            line_type = edit.get('line_type')
+            material_number = edit.get('material_number')
+            period = edit.get('period')
+            new_value = float(edit.get('new', 0))
+            original = float(edit.get('original', 0))
+
+            rows = current_engine.results.get(line_type, [])
+            target_row = next((r for r in rows if r.material_number == material_number), None)
+            if target_row is not None:
+                target_row.manual_edits[period] = {'original': original, 'new': new_value}
+                target_row.set_value(period, new_value)
+
+        # Re-run value planning
+        from modules.value_planning_engine import ValuePlanningEngine
+        current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+        current_engine.value_results = current_engine.value_engine.calculate()
+
+        results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+        value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+        consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+
+        return jsonify({
+            'success': True,
+            'results': results_dict,
+            'value_results': value_results_dict,
+            'consolidation': consolidation,
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 
 if __name__ == '__main__':
