@@ -41,16 +41,20 @@
                 <h1 class="text-xl font-bold">S&OP Planning Engine</h1>
                 <p class="text-sm text-slate-400">Python Implementation (Replaces VBA Macros)</p>
             </div>
-            <div class="flex gap-3 items-center">
+            <div class="flex gap-3 items-center flex-wrap">
                 <input type="file" id="fileInput" accept=".xlsx,.xlsm" class="hidden" onchange="uploadFile(event)">
                 <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
                 <div class="flex gap-2 items-center text-sm">
+                    <label class="text-slate-400">Planning Month:</label>
+                    <input type="month" id="planningMonth" class="bg-slate-700 rounded px-2 py-1 text-sm text-gray-100" oninput="updateHorizonDisplay()">
+                </div>
+                <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Actuals:</label>
-                    <input type="number" id="monthsActuals" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center">
+                    <input type="number" id="monthsActuals" value="3" min="0" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" oninput="updateHorizonDisplay()">
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Forecast:</label>
-                    <input type="number" id="monthsForecast" value="12" min="1" max="24" class="bg-slate-700 rounded px-2 py-1 w-14 text-center">
+                    <input type="number" id="monthsForecast" value="12" min="1" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" oninput="updateHorizonDisplay()">
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
@@ -61,6 +65,10 @@
     <div id="fileBanner" class="hidden bg-blue-900/50 border-b border-blue-700 py-2 px-4">
         <span class="text-blue-300"><strong id="fileName">-</strong></span>
         <span class="text-blue-400 text-sm ml-4" id="fileStats">-</span>
+    </div>
+    <div id="horizonBanner" class="hidden bg-indigo-900/40 border-b border-indigo-700/50 py-2 px-4 flex items-center gap-3">
+        <span class="text-indigo-400 text-xs font-semibold uppercase tracking-wide">Horizon</span>
+        <span class="text-indigo-200 text-sm" id="horizonText">-</span>
     </div>
     <main class="max-w-7xl mx-auto px-4 py-6">
         <div class="flex gap-2 mb-6 bg-slate-800/50 p-1 rounded-xl flex-wrap">
@@ -197,6 +205,26 @@ let finChart = null;
 
 function log(msg) { const d = document.getElementById('log'); d.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`; d.scrollTop = d.scrollHeight; }
 function status(msg) { document.getElementById('status').textContent = msg; }
+
+function updateHorizonDisplay() {
+    const pmVal = document.getElementById('planningMonth').value; // YYYY-MM
+    const actuals = Math.max(0, parseInt(document.getElementById('monthsActuals').value) || 0);
+    const forecast = Math.max(0, parseInt(document.getElementById('monthsForecast').value) || 0);
+    const banner = document.getElementById('horizonBanner');
+    const text = document.getElementById('horizonText');
+    if (!pmVal) { banner.classList.add('hidden'); return; }
+    const [yr, mo] = pmVal.split('-').map(Number);
+    const start = new Date(yr, mo - 1, 1);
+    const total = actuals + forecast;
+    const end = new Date(yr, mo - 1 + total - 1, 1);
+    const fmt = d => d.toLocaleString('en', { month: 'short', year: 'numeric' });
+    const parts = [];
+    if (actuals > 0) parts.push(actuals + ' actuals');
+    if (forecast > 0) parts.push(forecast + ' forecast');
+    text.textContent = `Planning from ${fmt(start)} to ${fmt(end)}  —  ${parts.join(', ')}  (${total} months total)`;
+    banner.classList.remove('hidden');
+}
+
 function showTab(name, btn) {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
     document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active'); b.classList.add('text-slate-400'); });
@@ -223,6 +251,14 @@ async function uploadFile(e) {
 }
 
 async function runCalc() {
+    // --- Validation ---
+    const pmRaw = document.getElementById('planningMonth').value; // YYYY-MM
+    if (!pmRaw) { alert('Please select a Planning Month before calculating.'); return; }
+    const monthsActuals = Math.max(0, parseInt(document.getElementById('monthsActuals').value) || 0);
+    const monthsForecast = Math.max(1, parseInt(document.getElementById('monthsForecast').value) || 1);
+    if (monthsActuals + monthsForecast < 1) { alert('Total planning horizon (actuals + forecast) must be at least 1 month.'); return; }
+    const planningMonth = pmRaw.replace('-', '/'); // YYYY-MM → YYYY/MM
+
     status('Calculating...'); log('Starting Python engine...');
     // Reset client-side edit state before a fresh calculation
     state.cellEdits = {};
@@ -230,19 +266,17 @@ async function runCalc() {
     const editBtn = document.getElementById('editModeBtn');
     if (editBtn) { editBtn.textContent = 'Edit Volumes'; editBtn.classList.remove('edit-mode-active','text-yellow-300'); }
     updateEditBadge();
-    const monthsActuals = parseInt(document.getElementById('monthsActuals').value) || 12;
-    const monthsForecast = parseInt(document.getElementById('monthsForecast').value) || 12;
-    log('Parameters: months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
+    log('Parameters: planning_month=' + planningMonth + ', months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
     try {
         const res = await fetch('/api/calculate', { 
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ months_actuals: monthsActuals, months_forecast: monthsForecast })
+            body: JSON.stringify({ planning_month: planningMonth, months_actuals: monthsActuals, months_forecast: monthsForecast })
         });
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
         log('Complete! Rows: ' + data.summary.total_rows);
-        if (data.parameters) log('Engine: actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
+        if (data.parameters) log('Engine: planning_month=' + data.parameters.planning_month + ', actuals=' + data.parameters.months_actuals + ', forecast=' + data.parameters.months_forecast);
         Object.entries(data.summary.line_types).forEach(([lt, c]) => log('  ' + lt + ': ' + c));
         await loadResults();
         await loadValueResults();
@@ -291,12 +325,17 @@ function loadValuePlanningData() {
     document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2 Column</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.valueResults).flat() : (state.valueResults[lt] || []);
     document.getElementById('vpRowCount').textContent = items.length;
-    let html = items.slice(0, 500).map(item => {
+    let html = items.map(item => {
         const isConsol = item.material_number.startsWith('ZZZZZZ_');
         const cls = isConsol ? 'bg-slate-700/50 font-semibold' : '';
         const auxVal = item.aux_column != null ? (isNaN(Number(item.aux_column)) ? item.aux_column : fmtVal(Number(item.aux_column))) : '-';
-        const aux2Val = item.aux_2_column != null ? (isNaN(Number(item.aux_2_column)) ? item.aux_2_column : fmtVal(Number(item.aux_2_column))) : '-';
-        return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${auxVal}</td><td class="text-blue-400">${aux2Val}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
+        const a2rawVP = item.aux_2_column != null ? String(item.aux_2_column) : '';
+        const a2flagVP = a2rawVP.endsWith('!');
+        const a2baseVP = a2flagVP ? a2rawVP.slice(0, -1) : a2rawVP;
+        const aux2Val = a2baseVP ? (isNaN(Number(a2baseVP)) ? a2baseVP : fmtVal(Number(a2baseVP))) : '-';
+        const aux2Disp = a2flagVP ? aux2Val + ' ⚠' : aux2Val;
+        const aux2Style = a2flagVP ? ' style="background:rgba(255,199,206,0.25)"' : '';
+        return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${auxVal}</td><td class="text-blue-400"${aux2Style}>${aux2Disp}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
     }).join('');
     document.getElementById('vpBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
 }
@@ -416,7 +455,7 @@ async function loadUtilChart() {
         document.getElementById('kpi-util').textContent = count > 0 ? (total / count).toFixed(1) + '%' : '0%';
     } catch (err) { log('Chart error: ' + err); }
 }
-const EDITABLE_LINE_TYPES = ['01. Demand forecast', '06. Production plan', '06. Purchase receipt'];
+const EDITABLE_LINE_TYPES = ['01. Demand forecast', '05. Minimum target stock', '06. Production plan', '06. Purchase receipt'];
 
 function loadPlanningData() {
     if (!state.results) return;
@@ -424,9 +463,15 @@ function loadPlanningData() {
     const periods = state.periods.slice(0, 8);
     document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
+    // Sort: material number ascending, then line type ascending (01→12)
+    items = items.slice().sort((a, b) => {
+        const matCmp = a.material_number.localeCompare(b.material_number, undefined, { numeric: true });
+        if (matCmp !== 0) return matCmp;
+        return a.line_type.localeCompare(b.line_type);
+    });
     document.getElementById('rowCount').textContent = items.length;
     const isEditable = (lineType) => state.editMode && EDITABLE_LINE_TYPES.includes(lineType);
-    let html = items.slice(0, 500).map(item => {
+    let html = items.map(item => {
         const periodCells = periods.map(p => {
             const key = `${item.line_type}||${item.material_number}||${p}`;
             const edit = state.cellEdits[key];
@@ -446,7 +491,11 @@ function loadPlanningData() {
             }
             return `<td class="${cls}"${tooltip}>${fmt(val)}${indicator}</td>`;
         }).join('');
-        return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400">${item.aux_2_column || '-'}</td>${periodCells}</tr>`;
+        const a2raw = item.aux_2_column || '';
+        const a2flag = a2raw.endsWith('!');
+        const a2disp = a2flag ? a2raw.slice(0, -1) + ' ⚠' : (a2raw || '-');
+        const a2style = a2flag ? ' style="background:rgba(255,199,206,0.25)"' : '';
+        return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400"${a2style}>${a2disp}</td>${periodCells}</tr>`;
     }).join('');
     document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
 }

@@ -46,6 +46,7 @@ class InventoryEngine:
         forecast: Dict[str, float],
         dependent_demand_agg: Dict[str, float],
         dependent_demand_by_parent: Dict[str, Dict[str, float]],
+        override_target_stock: Optional[float] = None,
     ) -> Dict:
         material = self.data.materials.get(mat_num)
         if not material:
@@ -64,17 +65,29 @@ class InventoryEngine:
 
         # === LINE 05: Minimum Target Stock = safety_stock + strategic_stock ===
         ss_config = self.data.safety_stock.get(mat_num)
-        target_value = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
+        if override_target_stock is not None:
+            target_value = override_target_stock
+        else:
+            target_value = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
 
-        demand_values = [total_demand.get(p, 0.0) for p in self.periods]
-        avg_demand = sum(demand_values) / len(demand_values) if demand_values else 0.0
-        coverage = target_value / avg_demand if avg_demand > 0 else 0.0
+        # Aux2 = IFERROR( Aux1 / AVERAGE(Line03 across forecast columns only), 0 )
+        # VBA uses only the forecast portion of the planning window (excluding actuals months).
+        actuals_count = getattr(self.data, 'forecast_actuals_months', 0)
+        forecast_periods = self.periods[actuals_count:]
+        forecast_demand_values = [total_demand.get(p, 0.0) for p in forecast_periods] if forecast_periods else []
+        avg_forecast_demand = sum(forecast_demand_values) / len(forecast_demand_values) if forecast_demand_values else 0.0
+        coverage = round(target_value / avg_forecast_demand, 1) if avg_forecast_demand > 0 else 0.0
+        # Append '!' as a warning flag when coverage exceeds 6 months (VBA: light red RGB 255,199,206)
+        if coverage > 0:
+            coverage_str = f"{coverage:.1f}!" if coverage > 6 else f"{coverage:.1f}"
+        else:
+            coverage_str = None
 
         target_stock_data = {p: target_value for p in self.periods}
         rows.append(self._make_row(
             mat_num, material, LineType.MIN_TARGET_STOCK.value,
             aux_column=str(target_value) if target_value else None,
-            aux_2_column=str(coverage) if coverage else None,
+            aux_2_column=coverage_str,
             values=target_stock_data,
         ))
 

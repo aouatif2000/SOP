@@ -78,6 +78,46 @@ class PlanningEngine:
         self.data = DataLoader(self.file_path)
         self.data.load_all()
 
+        # ===== STEP 1b: Apply UI parameter overrides =====
+        # All three UI values (planning_month, months_forecast, months_actuals) must be
+        # applied here — before any engine is instantiated — so that data.periods and
+        # data.forecast_actuals_months are the single source of truth for the full
+        # pipeline.  Engines read these attributes directly; none of them re-read the
+        # Excel Config sheet after this point.
+        #
+        # planning_month  → data.config.initial_date  → period window start
+        #                                              → actuals/forecast boundary
+        #                                              → opening inventory date
+        # months_forecast → data.config.forecast_months → length of data.periods
+        #                                              → every engine's period loop
+        # months_actuals  → data.forecast_actuals_months → Aux2 start index in
+        #                                              ForecastEngine._calculate_aux_columns
+
+        if self.planning_month:
+            try:
+                pm = datetime.strptime(self.planning_month, '%Y/%m')
+                self.data.config.initial_date = pm
+                print(f"  >> planning_month override: start={pm.strftime('%Y-%m')}")
+            except ValueError:
+                print(f"  >> WARNING: Could not parse planning_month='{self.planning_month}' "
+                      f"(expected YYYY/MM) — using date from Excel Config sheet")
+
+        if self.months_forecast > 0:
+            self.data.config.forecast_months = self.months_forecast
+            print(f"  >> months_forecast override: {self.months_forecast} periods")
+
+        # Regenerate periods once — after both start-date and length are finalised.
+        self.data.periods = self.data.config.get_periods()
+
+        # months_actuals = 0 means "keep the Excel Config value" (existing convention).
+        if self.months_actuals > 0:
+            self.data.forecast_actuals_months = self.months_actuals
+            print(f"  >> months_actuals override: {self.months_actuals} actuals months")
+
+        print(f"  >> Final horizon: {len(self.data.periods)} periods starting "
+              f"{self.data.periods[0] if self.data.periods else 'N/A'}, "
+              f"actuals={self.data.forecast_actuals_months}")
+
         # ===== STEP 2: Demand Forecast (Line 01) =====
         print("\n[STEP 2] Calculating Demand Forecast (Line 01)...")
         # Use config values if not explicitly overridden
