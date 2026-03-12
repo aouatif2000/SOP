@@ -47,11 +47,15 @@ class InventoryEngine:
         dependent_demand_agg: Dict[str, float],
         dependent_demand_by_parent: Dict[str, Dict[str, float]],
         override_target_stock: Optional[float] = None,
+        override_forecast: Optional[Dict[str, float]] = None,
     ) -> Dict:
         material = self.data.materials.get(mat_num)
         if not material:
             return {'total_demand': {}, 'target_stock_value': 0, 'production_plan': None,
                     'purchase_receipt': None, 'purchase_plan': None, 'inventory': {}, 'rows': []}
+
+        if override_forecast is not None:
+            forecast = override_forecast
 
         rows: List[PlanningRow] = []
 
@@ -86,7 +90,7 @@ class InventoryEngine:
         target_stock_data = {p: target_value for p in self.periods}
         rows.append(self._make_row(
             mat_num, material, LineType.MIN_TARGET_STOCK.value,
-            aux_column=str(target_value) if target_value else None,
+            aux_column=(str(int(target_value)) if target_value == int(target_value) else str(round(target_value, 2))) if target_value else None,
             aux_2_column=coverage_str,
             values=target_stock_data,
         ))

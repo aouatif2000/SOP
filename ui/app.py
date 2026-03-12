@@ -444,6 +444,7 @@ def update_volume():
             r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
             if r.material_number != material_number
         ]
+        children_demand = {}
         if inv_result['production_plan'] is not None:
             children_demand = bom_eng.compute_dependent_requirements(
                 material_number, inv_result['production_plan']
@@ -451,6 +452,37 @@ def update_volume():
             if children_demand:
                 dr_rows = bom_eng.create_dependent_requirements_rows(material_number, children_demand)
                 current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
+
+        # Steps 10/11: Update child Line 02 and recalculate child Line 03
+        for child_mat, child_period_demand in children_demand.items():
+            # Remove the stale contribution of this parent from child's Line 02
+            current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
+                r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                if not (r.material_number == child_mat and r.aux_column == material_number)
+            ]
+            child_l02_new = bom_eng.create_dependent_demand_rows(
+                child_mat, {material_number: child_period_demand}
+            )
+            current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
+
+            # Recompute child Line 03 = child L01 + all child L02 rows
+            child_l01_row = next(
+                (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+                 if r.material_number == child_mat), None
+            )
+            child_l03_row = next(
+                (r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
+                 if r.material_number == child_mat), None
+            )
+            if child_l03_row:
+                child_all_l02 = [
+                    r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                    if r.material_number == child_mat
+                ]
+                for p in periods_list:
+                    fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
+                    dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
+                    child_l03_row.values[p] = fc_val + dep_val
 
         # Steps 6/8/9/10: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
         cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans)
@@ -462,8 +494,137 @@ def update_volume():
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()
 
+    elif line_type == LineType.DEMAND_FORECAST.value:
+        # Full cascade: Line 01 → Lines 03-07 → Line 08 → child Lines 02/03
+        #   → Lines 07cap/09/10/11/12 → values
+        from modules.inventory_engine import InventoryEngine
+        from modules.capacity_engine import CapacityEngine
+        from modules.bom_engine import BOMEngine
+        from modules.value_planning_engine import ValuePlanningEngine
+
+        periods_list = current_engine.data.periods
+
+        # Reconstruct forecast (Line 01) — already has new_value applied via set_value above
+        l01_rows = current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+        fc_row = next((r for r in l01_rows if r.material_number == material_number), None)
+        forecast_vals = dict(fc_row.values) if fc_row else {p: 0.0 for p in periods_list}
+
+        # Reconstruct aggregated + per-parent dependent demand (Line 02)
+        l02_rows = current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+        mat_l02 = [r for r in l02_rows if r.material_number == material_number]
+        dep_demand_agg = {p: 0.0 for p in periods_list}
+        dep_demand_by_parent = {}
+        for r in mat_l02:
+            parent = r.aux_column
+            if parent:
+                dep_demand_by_parent[parent] = dict(r.values)
+                for p in periods_list:
+                    dep_demand_agg[p] = dep_demand_agg.get(p, 0.0) + r.values.get(p, 0.0)
+
+        # Save current Line 05 — VBA step 3: target stock stays unchanged
+        l05_rows = current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+        l05_row = next((r for r in l05_rows if r.material_number == material_number), None)
+        l05_saved_values = dict(l05_row.values) if l05_row else {}
+        l05_saved_edits = dict(l05_row.manual_edits) if l05_row else {}
+
+        # Steps 1/2/4/5/6: re-run inventory engine with updated forecast
+        inv_eng = InventoryEngine(current_engine.data)
+        inv_result = inv_eng.calculate_for_material(
+            material_number, forecast_vals, dep_demand_agg, dep_demand_by_parent,
+            override_forecast=forecast_vals,
+        )
+
+        # Replace Lines 03/04/05/06/07-purchplan for this material
+        inv_line_types = [
+            LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
+            LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
+            LineType.PURCHASE_RECEIPT.value, LineType.PURCHASE_PLAN.value,
+        ]
+        for lt in inv_line_types:
+            current_engine.results[lt] = [
+                r for r in current_engine.results.get(lt, []) if r.material_number != material_number
+            ]
+        for row in inv_result['rows']:
+            if row.line_type in current_engine.results:
+                current_engine.results[row.line_type].append(row)
+
+        # Step 3: Restore Line 05 to pre-cascade values (stays unchanged per VBA)
+        new_l05 = next(
+            (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+             if r.material_number == material_number), None
+        )
+        if new_l05:
+            new_l05.values = l05_saved_values
+            new_l05.manual_edits = l05_saved_edits
+
+        # Update cross-material production tracking dicts
+        if inv_result['production_plan'] is not None:
+            current_engine.all_production_plans[material_number] = inv_result['production_plan']
+        else:
+            current_engine.all_production_plans.pop(material_number, None)
+        if inv_result['purchase_receipt'] is not None:
+            current_engine.all_purchase_receipts[material_number] = inv_result['purchase_receipt']
+        else:
+            current_engine.all_purchase_receipts.pop(material_number, None)
+
+        # Step 9: Rebuild Line 08 (Dependent Requirements) for this material
+        bom_eng = BOMEngine(current_engine.data)
+        current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value] = [
+            r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
+            if r.material_number != material_number
+        ]
+        children_demand = {}
+        if inv_result['production_plan'] is not None:
+            children_demand = bom_eng.compute_dependent_requirements(
+                material_number, inv_result['production_plan']
+            )
+            if children_demand:
+                dr_rows = bom_eng.create_dependent_requirements_rows(material_number, children_demand)
+                current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
+
+        # Steps 10/11: Update child Line 02 and recalculate child Line 03
+        for child_mat, child_period_demand in children_demand.items():
+            # Remove the stale contribution of this parent from child's Line 02
+            current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
+                r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                if not (r.material_number == child_mat and r.aux_column == material_number)
+            ]
+            child_l02_new = bom_eng.create_dependent_demand_rows(
+                child_mat, {material_number: child_period_demand}
+            )
+            current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
+
+            # Recompute child Line 03 = child L01 + all child L02 rows
+            child_l01_row = next(
+                (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+                 if r.material_number == child_mat), None
+            )
+            child_l03_row = next(
+                (r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
+                 if r.material_number == child_mat), None
+            )
+            if child_l03_row:
+                child_all_l02 = [
+                    r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                    if r.material_number == child_mat
+                ]
+                for p in periods_list:
+                    fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
+                    dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
+                    child_l03_row.values[p] = fc_val + dep_val
+
+        # Steps 8/12/13: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans)
+        cap_results = cap_eng.calculate()
+        for lt, cap_rows in cap_results.items():
+            current_engine.results[lt] = cap_rows
+
+        # Step 14: Re-run value planning
+        current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+        current_engine.value_results = current_engine.value_engine.calculate()
+
     else:
-        # Line 01 / Line 06: value already set above; just refresh value planning
+        # Line 06: value already set above; just refresh value planning
         from modules.value_planning_engine import ValuePlanningEngine
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()

@@ -80,9 +80,9 @@ class ForecastEngine:
         # Take the first months_actuals values from historical
         if historical_values and self.months_actuals > 0:
             actuals_pool = historical_values[:self.months_actuals]
-            aux_1 = round(sum(actuals_pool) / len(actuals_pool), 2) if actuals_pool else 0.0
+            aux_1 = round(sum(actuals_pool) / len(actuals_pool)) if actuals_pool else 0
         else:
-            aux_1 = 0.0
+            aux_1 = 0
 
         # Aux 2: AVERAGE of values copied from forecast sheet to planning sheet
         #
@@ -111,9 +111,9 @@ class ForecastEngine:
             end_idx = min(len(all_values), end_idx)
 
             pool = all_values[start_idx:end_idx]
-            aux_2 = round(sum(pool) / len(pool), 2) if pool else 0.0
+            aux_2 = round(sum(pool) / len(pool)) if pool else 0
         else:
-            aux_2 = 0.0
+            aux_2 = 0
 
         return str(aux_1), str(aux_2)
 

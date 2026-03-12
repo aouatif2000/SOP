@@ -338,6 +338,7 @@ function loadValuePlanningData() {
         return `<tr class="${cls}"><td class="font-mono text-xs">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${auxVal}</td><td class="text-blue-400"${aux2Style}>${aux2Disp}</td><td class="text-right">${item.starting_stock ? fmtVal(item.starting_stock) : '-'}</td>${periods.map(p => `<td class="text-right">${fmtVal(item.values[p] || 0)}</td>`).join('')}</tr>`;
     }).join('');
     document.getElementById('vpBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+    filterVPTable();
 }
 
 function filterVPTable() {
@@ -498,6 +499,7 @@ function loadPlanningData() {
         return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400"${a2style}>${a2disp}</td>${periodCells}</tr>`;
     }).join('');
     document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+    filterTable();
 }
 
 function toggleEditMode() {
