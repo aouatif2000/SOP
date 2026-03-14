@@ -365,7 +365,20 @@ def export():
     export_dir.mkdir(exist_ok=True)
 
     export_path = export_dir / f'SOP_Python_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
-    current_engine.to_excel_with_values(str(export_path))
+
+    # Build inventory quality engine to pass for Top 10 sheet
+    _iq_engine_export = None
+    try:
+        from modules.inventory_quality_engine import InventoryQualityEngine
+        _iq_engine_export = InventoryQualityEngine(
+            current_engine.data,
+            current_engine.results,
+            current_engine.value_results,
+        )
+    except Exception:
+        pass
+
+    current_engine.to_excel_with_values(str(export_path), inventory_quality_engine=_iq_engine_export)
 
     # Apply edit highlights and summary sheet if there are any edits
     _apply_edit_highlights(str(export_path), current_engine)

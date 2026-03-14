@@ -144,7 +144,7 @@
                 <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Planning Month:</label>
-                    <input type="month" id="planningMonth" class="bg-slate-700 rounded px-2 py-1 text-sm text-gray-100 w-28 md:w-auto" oninput="updateHorizonDisplay()">
+                    <input type="month" id="planningMonth" class="bg-slate-700 rounded px-2 py-1 text-sm text-gray-100 w-28 md:w-auto" oninput="updateHorizonDisplay(); if(state.top10Overstocks.length) renderTop10Overstocks(state.top10Overstocks);">
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Actuals:</label>
@@ -152,7 +152,7 @@
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Forecast:</label>
-                    <input type="number" id="monthsForecast" value="12" min="1" class="bg-slate-700 rounded px-2 py-1 w-12 md:w-14 text-center" oninput="updateHorizonDisplay()">
+                    <input type="number" id="monthsForecast" value="12" min="1" class="bg-slate-700 rounded px-2 py-1 w-12 md:w-14 text-center" oninput="updateHorizonDisplay(); if(state.top10Overstocks.length) renderTop10Overstocks(state.top10Overstocks);">
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
@@ -256,9 +256,14 @@
                         <p class="text-slate-500 text-sm">Run calculations to see heatmap</p>
                     </div>
                 </div>
-                <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-4">Top 10 Overstocks <span class="text-xs font-normal text-slate-500">(total EUR)</span></h3>
-                    <canvas id="overstocksChart" height="250"></canvas>
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <h2 class="font-semibold text-base">Top 10 Overstocks by Value (€)</h2>
+                        <button onclick="exportTop10PNG()" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <canvas id="overstocksChart" height="300"></canvas>
+                    </div>
                 </div>
             </div>
             <!-- Financial Metrics + ROCE Row -->
@@ -393,7 +398,7 @@
     <!-- Tooltip element (shared, positioned via JS) -->
     <div id="planTooltip"></div>
 <script>
-let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], cellEdits: {} };
+let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], cellEdits: {}, top10Overstocks: [] };
 let utilChart = null;
 let fteChart = null;
 let overstocksChart = null;
@@ -644,7 +649,8 @@ async function renderDashboard() {
         renderUtilizationChart(data.utilization_by_machine || [], data.periods || []);
         renderFteChart(data.fte_by_group || [], data.periods || []);
         renderInventoryHeatmap(data.inventory_quality || [], data.periods || []);
-        renderTop10Overstocks(data.top_10_overstocks || [], data.periods || []);
+        state.top10Overstocks = data.top_10_overstocks || [];
+        renderTop10Overstocks(state.top10Overstocks);
         renderFinancialChart(data.financials || {}, data.periods || []);
         renderRoceChart(data.financials || {}, data.periods || []);
     } catch (err) { log('Dashboard error: ' + err); }
@@ -778,37 +784,140 @@ function renderInventoryHeatmap(invQuality, periods) {
     wrap.innerHTML = html;
 }
 
-function renderTop10Overstocks(top10, periods) {
+/* Build period labels and raw keys for Top 10 Overstocks chart.
+   displayLabels: ['Overstock Starting stock', 'Overstock 01-Dec-25', ...]
+   rawKeys:       ['Starting stock', '2025-12', ...] (used for overstock_by_period lookup) */
+function buildTop10PeriodInfo(planningMonthVal, forecastMonths) {
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const rawKeys = ['Starting stock'];
+    const displayLabels = ['Overstock Starting stock'];
+    if (planningMonthVal) {
+        const [yr, mo] = planningMonthVal.split('-').map(Number);
+        if (yr && mo) {
+            for (let i = 1; i <= forecastMonths; i++) {
+                const d = new Date(yr, mo - 1 + i, 1);
+                const y = d.getFullYear();
+                const mIdx = d.getMonth(); // 0-indexed
+                const yy = String(y).slice(-2);
+                rawKeys.push(`${y}-${String(mIdx + 1).padStart(2, '0')}`);
+                displayLabels.push(`Overstock 01-${MONTHS[mIdx]}-${yy}`);
+            }
+        }
+    }
+    return { displayLabels, rawKeys };
+}
+
+/* Keep legacy helper for any other callers */
+function buildPeriodLabels(planningMonthVal, forecastMonths) {
+    if (!planningMonthVal) return null;
+    const [yr, mo] = planningMonthVal.split('-').map(Number);
+    if (!yr || !mo) return null;
+    const labels = ['Starting stock'];
+    for (let i = 1; i <= forecastMonths; i++) {
+        const d = new Date(yr, mo - 1 + i, 1);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        labels.push(`${y}-${m}`);
+    }
+    return labels;
+}
+
+function exportTop10PNG() {
+    if (!overstocksChart) return;
+    const a = document.createElement('a');
+    a.href = overstocksChart.toBase64Image();
+    a.download = 'top10_overstocks.png';
+    a.click();
+}
+
+function renderTop10Overstocks(top10) {
     const canvas = document.getElementById('overstocksChart');
     if (!canvas) return;
     if (overstocksChart) { overstocksChart.destroy(); overstocksChart = null; }
     if (!top10 || !top10.length) return;
-    const sorted = top10.slice().sort((a, b) => (a.total_overstock || 0) - (b.total_overstock || 0)); // ascending for horizontal bars
-    const labels = sorted.map(m => ((m.material_name || m.material_number) + '').substring(0, 20));
-    const values = sorted.map(m => m.total_overstock || 0);
+
+    // === DEBUG ===
+    const sample = top10[0];
+    console.log('=== OVERSTOCK DEBUG ===');
+    console.log('Material name:', sample.name);
+    console.log('overstock_by_period:', JSON.stringify(sample.overstock_by_period));
+    console.log('All keys:', Object.keys(sample.overstock_by_period || {}));
+    console.log('First key value:', Object.values(sample.overstock_by_period || {})[0]);
+    console.log('Total materials:', top10.length);
+    // === END DEBUG ===
+
+    const colorPalette = ['#4472C4','#ED7D31','#A5A5A5','#FFC000','#5B9BD5','#70AD47','#7030A0','#833C00','#C9C9C9','#FFE699'];
+
+    // Step A: get ALL period keys directly from the first material's data
+    const rawKeys = Object.keys(top10[0].overstock_by_period || {});
+
+    // Step B: sort keys — put 'Starting stock' first, then sort rest chronologically
+    const sortedKeys = [
+        ...rawKeys.filter(k => k === 'Starting stock'),
+        ...rawKeys.filter(k => k !== 'Starting stock').sort()
+    ];
+
+    // Step C: build X-axis labels with display prefix
+    const labels = sortedKeys.map(k => k === 'Starting stock' ? 'Overstock Starting stock' : 'Overstock ' + k);
+
+    // Step D: build one dataset per material using rawKeys for lookup
+    // Sort materials descending by total_overstock so highest = first dataset
+    const sortedMats = top10.slice().sort((a, b) => (b.total_overstock || 0) - (a.total_overstock || 0));
+    const datasets = sortedMats.map((mat, idx) => ({
+        label: mat.name || mat.material_name || mat.material_number || ('Material ' + (idx + 1)),
+        backgroundColor: colorPalette[idx % colorPalette.length],
+        borderWidth: 0,
+        data: sortedKeys.map(k => {
+            const val = (mat.overstock_by_period || {})[k];
+            console.log('mat:', mat.name, 'key:', k, 'val:', val); // debug
+            return (val !== undefined && val !== null) ? Number(val) : 0;
+        })
+    }));
+
+    // Step E: verify at least one non-zero value exists
+    const totalSum = datasets.reduce((s, ds) => s + ds.data.reduce((a, b) => a + b, 0), 0);
+    console.log('Total sum of all values:', totalSum);
+    if (totalSum === 0) console.error('ALL VALUES ARE ZERO - key mismatch still exists');
+
     overstocksChart = new Chart(canvas.getContext('2d'), {
         type: 'bar',
-        data: {
-            labels,
-            datasets: [{
-                label: 'Overstock (EUR)',
-                data: values,
-                backgroundColor: 'rgba(239,68,68,0.65)',
-                borderColor: 'rgba(239,68,68,1)',
-                borderWidth: 1,
-                borderRadius: 3,
-            }]
-        },
+        data: { labels, datasets },
         options: {
-            indexAxis: 'y',
             responsive: true,
             plugins: {
-                legend: { display: false },
-                tooltip: { callbacks: { label: ctx => ' ' + fmtVal(ctx.parsed.x) + ' EUR' } }
+                title: {
+                    display: true,
+                    text: 'Top 10 Overstocks',
+                    color: '#e2e8f0',
+                    font: { size: 14, weight: 'bold' }
+                },
+                legend: {
+                    display: true,
+                    position: 'bottom',
+                    labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => ` ${ctx.dataset.label}: \u20ac${Math.round(ctx.parsed.y).toLocaleString('fr-FR')}`
+                    }
+                }
             },
             scales: {
-                x: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => fmtVal(v) } },
-                y: { grid: { display: false }, ticks: { color: '#e2e8f0', font: { size: 10 } } }
+                x: {
+                    stacked: true,
+                    grid: { color: 'rgba(255,255,255,0.05)' },
+                    ticks: { color: '#e2e8f0', font: { size: 10 }, maxRotation: 45, minRotation: 45 }
+                },
+                y: {
+                    stacked: true,
+                    beginAtZero: true,
+                    title: { display: true, text: 'Value (\u20ac)', color: '#94a3b8' },
+                    grid: { color: '#334155' },
+                    ticks: {
+                        color: '#94a3b8',
+                        callback: function(val) { return '\u20ac' + val.toLocaleString('fr-FR'); }
+                    }
+                }
             }
         }
     });

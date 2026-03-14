@@ -18,6 +18,10 @@ from collections import defaultdict
 
 from modules.models import PlanningRow, LineType
 from modules.data_loader import DataLoader
+try:
+    from modules.inventory_quality_engine import InventoryQualityEngine as _IQEngine
+except ImportError:
+    _IQEngine = None
 from modules.forecast_engine import ForecastEngine
 from modules.bom_engine import BOMEngine
 from modules.inventory_engine import InventoryEngine
@@ -370,14 +374,30 @@ class PlanningEngine:
             for period, value in row.values.items():
                 row_dict[period] = value
             rows_data.append(row_dict)
-        return pd.DataFrame(rows_data)
+        df = pd.DataFrame(rows_data)
+        # VBA SortPlanningSheet (line 4811): sort by material number ASC, line type ASC, aux1 ASC, aux2 ASC
+        if not df.empty:
+            df = df.sort_values(
+                by=['Material number', 'Line type', 'Aux Column', 'Aux 2 Column'],
+                ascending=[True, True, True, True],
+                na_position='last',
+                key=lambda col: col.astype(str) if col.name in ['Material number', 'Aux Column', 'Aux 2 Column'] else col
+            ).reset_index(drop=True)
+        # VBA DeleteDoubleProcessRowsPackagedMaterials (line 1757): keep first occurrence of each
+        # (material_number, line_type, aux1, aux2) combination — sort above determines which is "first"
+        if not df.empty:
+            df = df.drop_duplicates(
+                subset=['Material number', 'Line type', 'Aux Column', 'Aux 2 Column'],
+                keep='first'
+            ).reset_index(drop=True)
+        return df
 
     def to_excel(self, output_path: str):
         df = self.to_dataframe()
         df.to_excel(output_path, sheet_name='Planning Results', index=False)
         print(f"\nResults exported to: {output_path}")
     
-    def to_excel_with_values(self, output_path: str):
+    def to_excel_with_values(self, output_path: str, inventory_quality_engine=None):
         """Export both volume planning and value planning to Excel with VBA-matching formatting."""
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             # Volume planning sheet
@@ -451,11 +471,175 @@ class PlanningEngine:
             if not df_values.empty:
                 self._apply_excel_formatting(wb['Values_Planning sheet'])
 
+            # ---- High-level overview sheet (VBA CreateHighLevelOverview line 2804) ----
+            from openpyxl.chart import BarChart, LineChart, Reference
+            from openpyxl.chart.series import SeriesLabel
+
+            ws_overview = wb.create_sheet('High-level overview')
+            ws_overview.sheet_properties.tabColor = '8B4513'  # brown tab matching VBA
+
+            # Collect consolidation rows
+            consol_rows = []
+            for lt, rows in self.value_results.items():
+                for row in rows:
+                    if row.line_type == LineType.CONSOLIDATION.value:
+                        consol_rows.append(row)
+
+            # Write header row: Metric | Summary | period1 | period2 | ...
+            ws_overview['A1'] = 'Metric'
+            ws_overview['B1'] = 'Summary'
+            for i, p in enumerate(self.data.periods):
+                ws_overview.cell(row=1, column=3 + i, value=p)
+
+            # Write consolidation data rows
+            for r_idx, row in enumerate(consol_rows, start=2):
+                ws_overview.cell(row=r_idx, column=1, value=row.material_number.replace('ZZZZZZ_', ''))
+                try:
+                    ws_overview.cell(row=r_idx, column=2, value=float(row.aux_2_column) if row.aux_2_column else 0)
+                except (ValueError, TypeError):
+                    ws_overview.cell(row=r_idx, column=2, value=0)
+                for i, p in enumerate(self.data.periods):
+                    ws_overview.cell(row=r_idx, column=3 + i, value=row.get_value(p))
+
+            n_periods = len(self.data.periods)
+            n_consol = len(consol_rows)
+            cats = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=1)
+
+            # Helper row for 15% ROCE target (placed just below data)
+            target_row = n_consol + 3
+            ws_overview.cell(row=target_row, column=1, value='Target (15%)')
+            for i in range(n_periods):
+                ws_overview.cell(row=target_row, column=3 + i, value=0.15)
+
+            # Placeholder cells for inventory charts (require InventoryQualityEngine)
+            placeholder_row = n_consol + 2
+            ws_overview.cell(row=placeholder_row, column=1, value='Inventory Quality & Top 10 Overstocks: See web dashboard')
+
+            # Chart 1 — Projected Financial Metrics (VBA step 141)
+            chart1 = LineChart()
+            chart1.title = 'Projected Financial Metrics'
+            chart1.width = 20
+            chart1.height = 12
+            chart1.y_axis.title = 'Value'
+            metrics_chart1 = ['TURNOVER', 'COST OF GOODS', 'GROSS MARGIN', 'INVENTORY VALUE']
+            for metric in metrics_chart1:
+                for r_idx, row in enumerate(consol_rows, start=2):
+                    if row.material_number.replace('ZZZZZZ_', '') == metric:
+                        data_ref = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=r_idx)
+                        chart1.add_data(data_ref, titles_from_data=False)
+                        chart1.series[-1].title = SeriesLabel(v=metric)
+                        break
+            chart1.set_categories(cats)
+            ws_overview.add_chart(chart1, 'A' + str(n_consol + 5))
+
+            # Chart 2 — ROCE Components (VBA step 144)
+            chart2 = LineChart()
+            chart2.title = 'ROCE Components'
+            chart2.width = 20
+            chart2.height = 12
+            chart2.y_axis.title = 'Value'
+            metrics_chart2 = ['EBIT', 'CAPITAL INVESTMENT', 'OPERATIONAL CASHFLOW']
+            for metric in metrics_chart2:
+                for r_idx, row in enumerate(consol_rows, start=2):
+                    if row.material_number.replace('ZZZZZZ_', '') == metric:
+                        data_ref = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=r_idx)
+                        chart2.add_data(data_ref, titles_from_data=False)
+                        chart2.series[-1].title = SeriesLabel(v=metric)
+                        break
+            chart2.set_categories(cats)
+            ws_overview.add_chart(chart2, 'A' + str(n_consol + 27))
+
+            # Chart 3 — ROCE bar chart with dashed 15% target line (VBA step 145)
+            chart3 = BarChart()
+            chart3.title = 'ROCE'
+            chart3.width = 20
+            chart3.height = 12
+            for r_idx, row in enumerate(consol_rows, start=2):
+                if 'ROCE' in row.material_number and 'CAPITAL' not in row.material_number:
+                    roce_ref = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=r_idx)
+                    chart3.add_data(roce_ref, titles_from_data=False)
+                    chart3.series[-1].title = SeriesLabel(v='ROCE')
+                    break
+            chart3.set_categories(cats)
+            target_ref = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=target_row)
+            line_overlay = LineChart()
+            line_overlay.add_data(target_ref, titles_from_data=False)
+            line_overlay.series[0].title = SeriesLabel(v='Target 15%')
+            line_overlay.series[0].graphicalProperties.line.dashStyle = 'dash'
+            line_overlay.series[0].graphicalProperties.line.solidFill = 'FF0000'
+            chart3 += line_overlay
+            ws_overview.add_chart(chart3, 'A' + str(n_consol + 49))
+
+            # ---- Top 10 Overstocks sheet (VBA CreateTop10OverstocksChart line 7116) ----
+            top10_count = 0
+            try:
+                # Use passed-in engine; fall back to constructing one from _IQEngine
+                _iq_instance = inventory_quality_engine
+                if _iq_instance is None and _IQEngine is not None:
+                    _iq_instance = _IQEngine(self.data, self.results, self.value_results)
+                if _iq_instance is not None:
+                    iq_data = _iq_instance.calculate()
+                    top10 = iq_data.get('top_10_overstocks', [])
+                    t10_periods = iq_data.get('periods', self.data.periods)
+                    if top10:
+                        ws_t10 = wb.create_sheet('Top 10 overstocks')
+                        top10_sorted = sorted(top10, key=lambda x: x.get('total_overstock', 0), reverse=True)
+                        num_mats = len(top10_sorted)
+                        num_p = len(t10_periods)
+
+                        # Row 1: headers — col A = 'Material', cols B+ = period labels
+                        ws_t10.cell(row=1, column=1, value='Material')
+                        for ci, p in enumerate(t10_periods, start=2):
+                            ws_t10.cell(row=1, column=ci, value=p)
+
+                        # Rows 2-11: one row per material
+                        for ri, item in enumerate(top10_sorted, start=2):
+                            ws_t10.cell(row=ri, column=1, value=item.get('material_name') or item['material_number'])
+                            for ci, p in enumerate(t10_periods, start=2):
+                                pdata = item.get('periods', {}).get(p, {})
+                                val = pdata.get('overstock', 0) if isinstance(pdata, dict) else 0
+                                ws_t10.cell(row=ri, column=ci, value=round(val, 0))
+                                ws_t10.cell(row=ri, column=ci).number_format = '#,##0'
+
+                        # Column widths
+                        ws_t10.column_dimensions['A'].width = 28
+                        for ci in range(2, num_p + 2):
+                            from openpyxl.utils import get_column_letter
+                            ws_t10.column_dimensions[get_column_letter(ci)].width = 11
+
+                        # Chart: vertical stacked bar, one series per period
+                        from openpyxl.chart import BarChart, Reference
+                        chart_t10 = BarChart()
+                        chart_t10.type = 'col'
+                        chart_t10.grouping = 'stacked'
+                        chart_t10.overlap = 100
+                        chart_t10.title = 'Top 10 Overstocks'
+                        chart_t10.y_axis.title = 'Value (EUR)'
+                        chart_t10.x_axis.title = 'Material'
+                        chart_t10.width = 25
+                        chart_t10.height = 15
+
+                        max_row = 1 + num_mats
+                        for col_idx in range(2, num_p + 2):
+                            data_ref = Reference(ws_t10, min_col=col_idx, min_row=1, max_row=max_row)
+                            chart_t10.add_data(data_ref, titles_from_data=True)
+                        cats_t10 = Reference(ws_t10, min_col=1, min_row=2, max_row=max_row)
+                        chart_t10.set_categories(cats_t10)
+
+                        ws_t10.add_chart(chart_t10, 'A14')
+                        top10_count = num_mats
+            except Exception as e:
+                print(f"  Warning: Top 10 overstocks sheet skipped: {e}")
+
         print(f"\nResults exported to: {output_path}")
         print(f"  - Planning sheet (volumes)")
         print(f"  - Values_Planning sheet (financial)")
         if fte_records:
             print(f"  - FTE requirements ({len(fte_records)} groups)")
+        if consol_rows:
+            print(f"  - High-level overview ({len(consol_rows)} consolidation rows, 3 charts)")
+        if top10_count:
+            print(f"  - Top 10 overstocks ({top10_count} materials)")
 
     def _apply_excel_formatting(self, ws):
         """Apply VBA-matching cell formatting to a planning worksheet.
