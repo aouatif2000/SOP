@@ -118,29 +118,41 @@
             line-height: 1; padding: 1px 4px; border-radius: 3px; background: none; border: none; cursor: pointer; }
         .session-delete:hover { color: #f87171; background: rgba(239,68,68,0.12); }
         /* ===== END SIDEBAR LAYOUT ===== */
+        /* ===== RESPONSIVE OVERRIDES ===== */
+        @media (max-width: 768px) {
+            #sidebar { position: fixed; z-index: 100; height: 100vh; transition: transform 0.3s; }
+            #sidebar.collapsed { transform: translateX(-100%); width: 280px; }
+            #sidebar-inner { width: 280px; }
+            #sidebarToggle { position: fixed; top: 50px; left: 4px; z-index: 101; }
+            .data-table td, .data-table th { font-size: 11px; padding: 4px 5px; }
+            .hm-table td, .hm-table th { font-size: 9px; padding: 2px 4px; }
+        }
+        @media (max-width: 480px) {
+            .data-table td, .data-table th { font-size: 10px; padding: 3px 4px; }
+        }
     </style>
 </head>
 <body class="text-gray-100">
     <header class="bg-slate-900/80 border-b border-slate-700 sticky top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-4">
+        <div class="max-w-7xl mx-auto px-3 py-3 md:px-4 md:py-4 flex items-center justify-between flex-wrap gap-4">
             <div>
-                <h1 class="text-xl font-bold">S&OP Planning Engine</h1>
-                <p class="text-sm text-slate-400">Python Implementation (Replaces VBA Macros)</p>
+                <h1 class="text-base md:text-xl font-bold">S&OP Planning Engine</h1>
+                <p class="text-sm text-slate-400 hidden sm:block">Python Implementation (Replaces VBA Macros)</p>
             </div>
-            <div class="flex gap-3 items-center flex-wrap">
+            <div class="flex gap-3 items-center flex-wrap text-xs md:text-sm">
                 <input type="file" id="fileInput" accept=".xlsx,.xlsm" class="hidden" onchange="uploadFile(event)">
                 <label for="fileInput" class="cursor-pointer btn-primary px-4 py-2 rounded-lg text-white">Load Excel</label>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Planning Month:</label>
-                    <input type="month" id="planningMonth" class="bg-slate-700 rounded px-2 py-1 text-sm text-gray-100" oninput="updateHorizonDisplay()">
+                    <input type="month" id="planningMonth" class="bg-slate-700 rounded px-2 py-1 text-sm text-gray-100 w-28 md:w-auto" oninput="updateHorizonDisplay()">
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Actuals:</label>
-                    <input type="number" id="monthsActuals" value="3" min="0" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" oninput="updateHorizonDisplay()">
+                    <input type="number" id="monthsActuals" value="3" min="0" class="bg-slate-700 rounded px-2 py-1 w-12 md:w-14 text-center" oninput="updateHorizonDisplay()">
                 </div>
                 <div class="flex gap-2 items-center text-sm">
                     <label class="text-slate-400">Forecast:</label>
-                    <input type="number" id="monthsForecast" value="12" min="1" class="bg-slate-700 rounded px-2 py-1 w-14 text-center" oninput="updateHorizonDisplay()">
+                    <input type="number" id="monthsForecast" value="12" min="1" class="bg-slate-700 rounded px-2 py-1 w-12 md:w-14 text-center" oninput="updateHorizonDisplay()">
                 </div>
                 <button onclick="runCalc()" id="calcBtn" disabled class="btn-success px-4 py-2 rounded-lg text-white disabled:opacity-50">Calculate</button>
                 <button onclick="exportData()" id="exportBtn" disabled class="bg-slate-700 px-4 py-2 rounded-lg disabled:opacity-50">Export</button>
@@ -166,6 +178,7 @@
         </div>
         <button id="sidebarToggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9668;</button>
       </div><!-- /sidebar-wrapper -->
+      <div id="sidebarOverlay" class="fixed inset-0 bg-black/50 z-[99] hidden md:hidden" onclick="toggleSidebar()"></div>
       <div id="main-content">
     <div id="fileBanner" class="hidden bg-blue-900/50 border-b border-blue-700 py-2 px-4">
         <span class="text-blue-300"><strong id="fileName">-</strong></span>
@@ -175,14 +188,14 @@
         <span class="text-indigo-400 text-xs font-semibold uppercase tracking-wide">Horizon</span>
         <span class="text-indigo-200 text-sm" id="horizonText">-</span>
     </div>
-    <main class="max-w-7xl mx-auto px-4 py-6">
-        <div class="flex gap-2 mb-6 bg-slate-800/50 p-1 rounded-xl flex-wrap">
-            <button class="tab-btn active px-4 py-2 rounded-lg" onclick="showTab('dashboard',this)">Dashboard</button>
-            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('planning',this)">Planning</button>
-            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('values',this)">Values Planning</button>
-            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('capacity',this)">Capacity</button>
-            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('inventory',this)">Inventory</button>
-            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg" onclick="showTab('log',this)">Log</button>
+    <main class="max-w-7xl mx-auto px-2 sm:px-4 py-3 sm:py-6">
+        <div class="flex gap-1 md:gap-2 mb-4 md:mb-6 overflow-x-auto bg-slate-800/50 p-1 rounded-xl">
+            <button class="tab-btn active px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('dashboard',this)">Dashboard</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('planning',this)">Planning</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('values',this)">Values Planning</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('capacity',this)">Capacity</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('inventory',this)">Inventory</button>
+            <button class="tab-btn text-slate-400 px-4 py-2 rounded-lg whitespace-nowrap text-xs md:text-sm flex-shrink-0" onclick="showTab('log',this)">Log</button>
         </div>
 
         <!-- Dashboard Tab -->
@@ -211,7 +224,7 @@
                 </div>
             </div>
             <!-- Charts Row -->
-            <div class="grid grid-cols-2 gap-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6">
                 <div class="card rounded-xl p-6">
                     <h3 class="font-semibold mb-1">Utilization by Machine <span class="text-xs font-normal text-slate-500">(first 6 periods)</span></h3>
                     <div class="flex gap-3 items-center mb-3 text-xs text-slate-400">
@@ -227,7 +240,7 @@
                 </div>
             </div>
             <!-- Inventory Heatmap + Top 10 Overstocks Row -->
-            <div class="grid grid-cols-2 gap-6 mt-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mt-4 lg:mt-6">
                 <div class="card rounded-xl p-6">
                     <h3 class="font-semibold mb-1">Inventory Quality Heatmap
                         <span class="text-xs font-normal text-slate-500 ml-2">(dominant category per period)</span>
@@ -249,7 +262,7 @@
                 </div>
             </div>
             <!-- Financial Metrics + ROCE Row -->
-            <div class="grid grid-cols-2 gap-6 mt-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mt-4 lg:mt-6">
                 <div class="card rounded-xl p-6">
                     <h3 class="font-semibold mb-4">Projected Financial Metrics <span class="text-xs font-normal text-slate-500">(000s EUR)</span></h3>
                     <canvas id="financialChart" height="220"></canvas>
@@ -294,7 +307,7 @@
         <!-- Values Planning Tab -->
         <div id="values-tab" class="tab-content hidden">
             <!-- Financial KPIs -->
-            <div class="grid grid-cols-4 gap-4 mb-6">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
                 <div class="kpi-card rounded-xl p-4" style="border-color: rgba(34, 197, 94, 0.4);">
                     <p class="text-slate-400 text-xs uppercase tracking-wide">Avg Monthly Turnover</p>
                     <p class="text-2xl font-bold text-green-400 mt-1" id="vp-turnover">-</p>
@@ -313,7 +326,7 @@
                 </div>
             </div>
 
-            <div class="grid grid-cols-2 gap-6 mb-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mb-4 lg:mb-6">
                 <!-- Financial Consolidation (P&L Tree) -->
                 <div class="card rounded-xl p-6">
                     <h3 class="font-semibold mb-4">Financial Consolidation (P&L / ROCE)</h3>
@@ -357,7 +370,7 @@
 
         <!-- Inventory Tab -->
         <div id="inventory-tab" class="tab-content hidden">
-            <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
                 <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Healthy</p><p class="text-2xl font-bold text-green-400" id="inv-ok">0</p></div>
                 <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Low Stock</p><p class="text-2xl font-bold text-red-400" id="inv-low">0</p></div>
                 <div class="kpi-card rounded-xl p-4 text-center"><p class="text-slate-400 text-sm">Overstock</p><p class="text-2xl font-bold text-yellow-400" id="inv-high">0</p></div>
@@ -1382,6 +1395,14 @@ function toggleSidebar() {
     const btn = document.getElementById('sidebarToggle');
     const collapsed = sidebar.classList.toggle('collapsed');
     btn.innerHTML = collapsed ? '&#9658;' : '&#9668;';
+    const overlay = document.getElementById('sidebarOverlay');
+    if (overlay) {
+        if (sidebar.classList.contains('collapsed')) {
+            overlay.classList.add('hidden');
+        } else {
+            overlay.classList.remove('hidden');
+        }
+    }
 }
 
 function handleDragOver(e) {
@@ -1406,6 +1427,12 @@ async function handleDrop(e) {
 }
 // ===== END SESSION SIDEBAR =====
 
+// Mobile: collapse sidebar by default on small screens
+if (window.innerWidth <= 768) {
+    document.getElementById('sidebar').classList.add('collapsed');
+    const btn = document.getElementById('sidebarToggle');
+    if (btn) btn.innerHTML = '&#9658;';
+}
 loadSessions();
 </script>
 </body>
