@@ -11,12 +11,12 @@ Lines calculated:
 
 CRITICAL LOGIC (verified against Excel VBA):
 - Production Plan: CEILING(need, BOM_header_quantity)  NOT lot_size!
-- Purchase Receipt: CEILING(need, lot_size_from_safety_stock)
+- Purchase Receipt: CEILING(need, MOQ_from_purchase_sheet)
 - For produced+purchased:
     1. production_need = raw_need * production_fraction
     2. production_plan = CEILING(production_need, BOM_header_qty) if > 0 else 0
     3. purchase_need = raw_need - production_plan  (residual, NOT proportional)
-    4. purchase_receipt = CEILING(purchase_need, BOM_header_qty) if > 0 else 0
+    4. purchase_receipt = CEILING(purchase_need, MOQ_from_purchase_sheet) if > 0 else 0
 - Inventory CAN go negative (backorder)
 """
 
@@ -171,8 +171,8 @@ class InventoryEngine:
                     # Frozen period: always use actual PO qty (0 if no PO)
                     purchase_receipt[period] = actuals_map.get(period, 0.0)
                 elif i == lead_time:
-                    # First flexible month: use actual if available
-                    if period in actuals_map:
+                    # First flexible month: only use actual if > 0 (VBA line 1864)
+                    if actuals_map.get(period, 0.0) > 0:
                         purchase_receipt[period] = actuals_map[period]
                 else:
                     break  # heuristic values kept for remaining months
@@ -198,7 +198,7 @@ class InventoryEngine:
             ))
 
         if purchase_receipt is not None:
-            purch_ceil_val = bom_header_qty if is_purchased_and_produced else purch_ceil_multiple
+            purch_ceil_val = self.data.get_purchase_moq(mat_num) if is_purchased_and_produced else purch_ceil_multiple
             purch_aux1 = str(int(purch_ceil_val)) if purch_ceil_val == int(purch_ceil_val) else str(purch_ceil_val)
             rows.append(self._make_row(
                 mat_num, material, LineType.PURCHASE_RECEIPT.value,

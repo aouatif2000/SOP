@@ -238,6 +238,39 @@ class PlanningEngine:
                     self.all_total_demands[mat_num] = result['total_demand']
 
         # ===== STEP 5: Capacity calculations =====
+        # NLI1 Exception 2: B15 production plan adjustment (VBA Exceptions_GTB lines 1873+)
+        # Must run AFTER all materials processed, BEFORE CapacityEngine.
+        if self.data.config and getattr(self.data.config, 'site', None) == 'NLI1':
+            B15   = '600004811'
+            B4010 = '600004831'
+            b4010_prod = self.all_production_plans.get(B4010, {})
+            b15_prod   = self.all_production_plans.get(B15)
+            if b15_prod is not None and b4010_prod:
+                # Subtract B4010 production from B15 production plan (floor at 0)
+                for p in self.data.periods:
+                    b15_prod[p] = max(0.0, b15_prod[p] - b4010_prod.get(p, 0.0))
+                # Update the Line 06 Production plan row for B15
+                for row in self.results.get(LineType.PRODUCTION_PLAN.value, []):
+                    if row.material_number == B15:
+                        row.values = dict(b15_prod)
+                        break
+                # Recalculate B15 inventory: B4010 production counts as additional supply
+                b15_inv_rows = [r for r in self.results.get(LineType.INVENTORY.value, [])
+                                if r.material_number == B15]
+                if b15_inv_rows:
+                    b15_inv    = b15_inv_rows[0]
+                    b15_demand = self.all_total_demands.get(B15, {})
+                    b15_purch  = self.all_purchase_receipts.get(B15) or {}
+                    running    = b15_inv.starting_stock
+                    for p in self.data.periods:
+                        demand           = b15_demand.get(p, 0.0)
+                        prod             = b15_prod.get(p, 0.0)
+                        purch            = b15_purch.get(p, 0.0)
+                        b4010_contrib    = b4010_prod.get(p, 0.0)
+                        running          = running - demand + prod + purch + b4010_contrib
+                        b15_inv.values[p] = running
+                print(f"[NLI1] Exception 2 applied: B15 production adjusted by B4010 contribution.")
+
         print("\n[STEP 5] Calculating capacity...")
         # Truck hours use '01. Demand forecast' volumes (VBA TruckOperationsFormulas SUMIFS)
         l01_rows = self.results.get('01. Demand forecast', [])
