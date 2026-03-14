@@ -67,6 +67,7 @@ def upload_file():
             'id': session_id,
             'file_path': str(file_path),
             'filename': file.filename,
+            'custom_name': None,
             'engine': None,
             'value_results': {},
             'metadata': {
@@ -743,15 +744,69 @@ def update_volume():
                 (r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
                  if r.material_number == child_mat), None
             )
+            child_all_l02 = [
+                r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                if r.material_number == child_mat
+            ]
             if child_l03_row:
-                child_all_l02 = [
-                    r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
-                    if r.material_number == child_mat
-                ]
                 for p in periods_list:
                     fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
                     dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
                     child_l03_row.values[p] = fc_val + dep_val
+
+            # Recalculate child inventory lines (L04/L05/L06/L07)
+            child_forecast_row = child_l01_row
+            child_forecast_vals = dict(child_forecast_row.values) if child_forecast_row else {p: 0.0 for p in periods_list}
+
+            child_dep_agg = {p: 0.0 for p in periods_list}
+            child_dep_by_parent = {}
+            for r in child_all_l02:
+                parent = r.aux_column
+                if parent:
+                    child_dep_by_parent[parent] = dict(r.values)
+                    for p in periods_list:
+                        child_dep_agg[p] += r.values.get(p, 0.0)
+
+            # Save child L05 (target stock stays unchanged per VBA)
+            child_l05_rows = current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+            child_l05 = next((r for r in child_l05_rows if r.material_number == child_mat), None)
+            child_l05_saved = dict(child_l05.values) if child_l05 else {}
+            child_l05_edits = dict(child_l05.manual_edits) if child_l05 else {}
+
+            child_inv_result = inv_eng.calculate_for_material(
+                child_mat, child_forecast_vals, child_dep_agg, child_dep_by_parent,
+                override_forecast=child_forecast_vals,
+            )
+
+            child_inv_types = [
+                LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
+                LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
+                LineType.PURCHASE_RECEIPT.value, LineType.PURCHASE_PLAN.value,
+            ]
+            for lt in child_inv_types:
+                current_engine.results[lt] = [
+                    r for r in current_engine.results.get(lt, []) if r.material_number != child_mat
+                ]
+            for row in child_inv_result['rows']:
+                if row.line_type in current_engine.results:
+                    current_engine.results[row.line_type].append(row)
+
+            new_child_l05 = next(
+                (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+                 if r.material_number == child_mat), None
+            )
+            if new_child_l05:
+                new_child_l05.values = child_l05_saved
+                new_child_l05.manual_edits = child_l05_edits
+
+            if child_inv_result['production_plan'] is not None:
+                current_engine.all_production_plans[child_mat] = child_inv_result['production_plan']
+            else:
+                current_engine.all_production_plans.pop(child_mat, None)
+            if child_inv_result['purchase_receipt'] is not None:
+                current_engine.all_purchase_receipts[child_mat] = child_inv_result['purchase_receipt']
+            else:
+                current_engine.all_purchase_receipts.pop(child_mat, None)
 
         # Steps 8/12/13: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
         l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
@@ -878,6 +933,7 @@ def list_sessions():
         grouped[key].append({
             'id':             sid,
             'filename':       sess.get('filename', ''),
+            'custom_name':    sess.get('custom_name'),
             'site':           site,
             'planning_month': pm,
             'uploaded_at':    sess.get('uploaded_at', ''),
@@ -886,6 +942,19 @@ def list_sessions():
             'metadata':       meta,
         })
     return jsonify({'active_session_id': active_session_id, 'groups': grouped})
+
+
+@app.route('/api/sessions/rename', methods=['POST'])
+def rename_session():
+    data = request.get_json() or {}
+    session_id = data.get('session_id', '')
+    new_name = data.get('name', '').strip()
+    if not session_id or session_id not in sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    if not new_name:
+        return jsonify({'error': 'Name cannot be empty'}), 400
+    sessions[session_id]['custom_name'] = new_name
+    return jsonify({'success': True, 'session_id': session_id, 'custom_name': new_name})
 
 
 @app.route('/api/sessions/switch', methods=['POST'])

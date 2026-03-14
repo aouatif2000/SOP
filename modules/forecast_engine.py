@@ -28,9 +28,21 @@ class ForecastEngine:
             if not material:
                 continue  # Skip materials not in material master
 
+            # VBA DemandForecast (line 868): positional copy from ForecastStartClmn
+            # ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
+            # The +1 is a gap column VBA always skips between actuals and forecast.
+            all_sorted = sorted(forecast_data.items())
+            all_values = [v for _, v in all_sorted]
+            config_actuals = self.data.forecast_actuals_months
+            start_idx = config_actuals + 1  # +1 gap column matches VBA
+
             self.results[mat_num] = {}
-            for period in self.periods:
-                self.results[mat_num][period] = forecast_data.get(period, 0.0)
+            for i, period in enumerate(self.periods):
+                val_idx = start_idx + i
+                if val_idx < len(all_values):
+                    self.results[mat_num][period] = all_values[val_idx]
+                else:
+                    self.results[mat_num][period] = 0.0
 
             aux_1, aux_2 = self._calculate_aux_columns(mat_num, forecast_data)
 
@@ -65,21 +77,13 @@ class ForecastEngine:
         if not first_planning_period:
             return "0", "0"
 
-        historical_values = []
-        forecast_values = []
+        # VBA AUX1 (line 874): AVERAGE(ForecastActualStartClmn : ForecastActualStartClmn + ForecastActualsMonths - 1)
+        # = positional average of the first months_actuals values in the Forecast sheet
+        all_sorted_aux = sorted(forecast_data.items())
+        all_values_aux = [v for _, v in all_sorted_aux]
 
-        for period, value in sorted(forecast_data.items()):
-            if period < first_planning_period:
-                historical_values.append(value)
-            elif period in self.periods:
-                forecast_values.append(value)
-
-        # Aux 1: AVERAGE of actuals (months_actuals cells from forecast sheet)
-        # VBA: AVERAGE(ForecastActualStartClmn : ForecastActualStartClmn + ForecastActualsMonths - 1)
-        # AVERAGE in Excel counts zeros, only ignores truly blank (missing) cells
-        # Take the first months_actuals values from historical
-        if historical_values and self.months_actuals > 0:
-            actuals_pool = historical_values[:self.months_actuals]
+        if self.months_actuals > 0 and all_values_aux:
+            actuals_pool = all_values_aux[:self.months_actuals]
             aux_1 = round(sum(actuals_pool) / len(actuals_pool)) if actuals_pool else 0
         else:
             aux_1 = 0

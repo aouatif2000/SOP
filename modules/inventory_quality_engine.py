@@ -71,21 +71,29 @@ class InventoryQualityEngine:
                 inventory_value = row.values.get(period, 0.0)
                 mat_total_inventory += inventory_value
 
+                # VBA: Safety and Strategic are ALWAYS shown (unconditional)
+                # Under is negative when inventory < target, 0 otherwise
+                # Normal and Overstock only appear when inventory >= target
+                s_safety = safety_val
+                s_strategic = strategic_val
+
                 if inventory_value < target_val:
-                    # Below target: all categories are 0 except Under
-                    under = inventory_value - target_val   # negative
-                    s_safety = 0.0
-                    s_strategic = 0.0
+                    # VBA Case 0: inv - safety - strategic (negative)
+                    under = inventory_value - target_val
                     s_normal = 0.0
                     s_overstock = 0.0
                 else:
                     under = 0.0
                     excess = inventory_value - target_val
-                    # Fill safety and strategic first, then the excess goes to normal/overstock
-                    s_safety = safety_val
-                    s_strategic = strategic_val
+                    # VBA Case 3: MIN(excess, lot_val)
                     s_normal = min(excess, lot_val)
+                    # VBA Case 4: IF(inv >= target + lot, inv - target - lot, 0)
                     s_overstock = max(0.0, excess - lot_val)
+
+                # Invariant: under + safety + strategic + normal + overstock = inventory_value
+                check = under + s_safety + s_strategic + s_normal + s_overstock
+                assert abs(check - inventory_value) < 0.01, \
+                    f"Invariant broken for {mat_num} period {period}: {check} != {inventory_value}"
 
                 mat_total_overstock += s_overstock
                 periods_data[period] = {

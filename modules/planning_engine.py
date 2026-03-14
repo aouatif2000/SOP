@@ -106,9 +106,11 @@ class PlanningEngine:
                 print(f"  >> WARNING: Could not parse planning_month='{self.planning_month}' "
                       f"(expected YYYY/MM) — using date from Excel Config sheet")
 
-        if self.months_forecast > 0:
-            self.data.config.forecast_months = self.months_forecast
-            print(f"  >> months_forecast override: {self.months_forecast} periods")
+        total_horizon = self.months_forecast
+        if self.months_actuals > 0:
+            total_horizon = self.months_actuals + self.months_forecast
+        self.data.config.forecast_months = total_horizon
+        print(f"  >> horizon override: {total_horizon} periods ({self.months_actuals} actuals + {self.months_forecast} forecast)")
 
         # Regenerate periods once — after both start-date and length are finalised.
         self.data.periods = self.data.config.get_periods()
@@ -356,24 +358,26 @@ class PlanningEngine:
         return self.summary
 
     def to_dataframe(self) -> pd.DataFrame:
+        # Always rebuild from self.results to pick up cascade changes
         rows_data = []
-        for row in self.all_rows:
-            row_dict = {
-                'Material number': row.material_number,
-                'Material name': row.material_name,
-                'Product type': row.product_type,
-                'Product family': row.product_family,
-                'SPC product': row.spc_product,
-                'Product cluster': row.product_cluster,
-                'Product name': row.product_name,
-                'Line type': row.line_type,
-                'Aux Column': row.aux_column,
-                'Aux 2 Column': row.aux_2_column,
-                'Starting stock': row.starting_stock,
-            }
-            for period, value in row.values.items():
-                row_dict[period] = value
-            rows_data.append(row_dict)
+        for line_type in self.EXPECTED_LINE_TYPES:
+            for row in self.results.get(line_type, []):
+                row_dict = {
+                    'Material number': row.material_number,
+                    'Material name': row.material_name,
+                    'Product type': row.product_type,
+                    'Product family': row.product_family,
+                    'SPC product': row.spc_product,
+                    'Product cluster': row.product_cluster,
+                    'Product name': row.product_name,
+                    'Line type': row.line_type,
+                    'Aux Column': row.aux_column,
+                    'Aux 2 Column': row.aux_2_column,
+                    'Starting stock': row.starting_stock,
+                }
+                for period, value in row.values.items():
+                    row_dict[period] = value
+                rows_data.append(row_dict)
         df = pd.DataFrame(rows_data)
         # VBA SortPlanningSheet (line 4811): sort by material number ASC, line type ASC, aux1 ASC, aux2 ASC
         if not df.empty:

@@ -510,7 +510,7 @@ async function loadValueResults() {
 function loadValuePlanningData() {
     if (!state.valueResults) return;
     const lt = document.getElementById('vpLtFilter').value;
-    const periods = state.periods.slice(0, 8);
+    const periods = state.periods;
     document.getElementById('vpHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2 Column</th><th>Starting Stock</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
     let items = lt === 'all' ? Object.values(state.valueResults).flat() : (state.valueResults[lt] || []);
     document.getElementById('vpRowCount').textContent = items.length;
@@ -553,7 +553,7 @@ function updateValueKPIs() {
 
 function renderConsolidation() {
     if (!state.consolidation.length) return;
-    const periods = state.periods.slice(0, 6);
+    const periods = state.periods;
     const rowStyles = {
         'ZZZZZZ_TURNOVER': { cls: 'consol-turnover', label: 'Turnover', color: 'text-green-400', bold: true },
         'ZZZZZZ_RAW MATERIAL COST': { cls: 'consol-cost', label: 'Raw Material Cost', color: 'text-orange-300' },
@@ -595,7 +595,7 @@ function renderConsolidation() {
 
 function renderFinChart() {
     if (!state.consolidation.length) return;
-    const periods = state.periods.slice(0, 12);
+    const periods = state.periods;
     const findRow = (name) => state.consolidation.find(r => r.material_number === name);
     const getValues = (name) => { const row = findRow(name); return periods.map(p => row ? (row.values[p] || 0) : 0); };
     const ctx = document.getElementById('finChart').getContext('2d');
@@ -669,7 +669,7 @@ function renderUtilizationChart(machines, periods) {
     const canvas = document.getElementById('utilChart');
     if (!canvas) return;
     if (utilChart) { utilChart.destroy(); utilChart = null; }
-    const displayPeriods = periods.slice(0, 6);
+    const displayPeriods = periods;
     if (!machines.length || !displayPeriods.length) return;
     // One dataset per machine; per-bar colors based on value vs thresholds
     const lineColors = ['#3b82f6','#6366f1','#8b5cf6','#ec4899','#f97316','#eab308','#22c55e','#06b6d4'];
@@ -1349,7 +1349,7 @@ function filterTable() {
 async function loadCapacityData() {
     try {
         const res = await fetch('/api/capacity'); const data = await res.json();
-        const periods = data.periods.slice(0, 12);
+        const periods = data.periods;
         document.getElementById('capHead').innerHTML = `<tr class="text-slate-400"><th>Machine</th>${periods.map(p => `<th class="text-center">${p}</th>`).join('')}</tr>`;
         let html = data.utilization.map(m => `<tr><td>${m.machine}</td>${periods.map(p => { const v = m.values[p] || 0; const cls = v > 95 ? 'heatmap-red' : v > 80 ? 'heatmap-yellow' : 'heatmap-green'; return `<td class="text-center ${cls}">${v.toFixed(0)}%</td>`; }).join('')}</tr>`).join('');
         document.getElementById('capBody').innerHTML = html || '<tr><td>No data</td></tr>';
@@ -1361,9 +1361,9 @@ async function loadInventoryData() {
         document.getElementById('inv-ok').textContent = data.summary.healthy;
         document.getElementById('inv-low').textContent = data.summary.low;
         document.getElementById('inv-high').textContent = data.summary.high;
-        const periods = data.periods.slice(0, 8);
+        const periods = data.periods;
         document.getElementById('invHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Status</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
-        let html = data.data.slice(0, 100).map(item => { const cls = item.status === 'LOW' ? 'text-red-400' : item.status === 'HIGH' ? 'text-yellow-400' : 'text-green-400'; return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 18)}</td><td class="font-bold ${cls}">${item.status}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`; }).join('');
+        let html = data.data.map(item => { const cls = item.status === 'LOW' ? 'text-red-400' : item.status === 'HIGH' ? 'text-yellow-400' : 'text-green-400'; return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 18)}</td><td class="font-bold ${cls}">${item.status}</td>${periods.map(p => `<td class="text-right">${fmt(item.values[p] || 0)}</td>`).join('')}</tr>`; }).join('');
         document.getElementById('invBody').innerHTML = html || '<tr><td>No data</td></tr>';
     } catch (err) { log('Error: ' + err); }
 }
@@ -1390,7 +1390,7 @@ async function _doUpload(file) {
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
         document.getElementById('fileBanner').classList.remove('hidden');
-        document.getElementById('fileName').textContent = data.filename;
+        document.getElementById('fileName').textContent = data.custom_name || data.filename;
         document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
         document.getElementById('kpi-mat').textContent = data.summary.materials;
         document.getElementById('kpi-bom').textContent = data.summary.bom_items;
@@ -1444,9 +1444,14 @@ function renderSessionList(groups, activeId) {
             const badgeTxt = sess.calculated ? 'Ready' : 'Pending';
             const nameColor = isActive ? '#93c5fd' : '#e2e8f0';
             const mats = (sess.metadata && sess.metadata.materials) || 0;
+            const displayName = sess.custom_name || sess.filename;
+            const escapedDisplay = displayName.replace(/'/g, "\\'");
             html += `<div class="session-item${isActive ? ' active' : ''}" onclick="switchSession('${sess.id}')">`
                   + `<div style="flex:1;min-width:0">`
-                  + `<div style="font-size:12px;color:${nameColor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${sess.filename}">${sess.filename}</div>`
+                  + `<div style="display:flex;align-items:center;gap:2px">`
+                  + `<div style="font-size:12px;color:${nameColor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1" title="${sess.filename}">${displayName}</div>`
+                  + `<button style="background:none;border:none;cursor:pointer;padding:0 2px;color:#64748b;font-size:11px;flex-shrink:0" onclick="event.stopPropagation();renameSession('${sess.id}','${escapedDisplay}')" title="Rename">&#9998;</button>`
+                  + `</div>`
                   + `<div style="font-size:10px;color:#64748b;margin-top:1px">${mats} materials</div>`
                   + `</div>`
                   + `<span class="session-badge ${badgeCls}">${badgeTxt}</span>`
@@ -1468,7 +1473,7 @@ async function switchSession(sessionId) {
         if (data.error) { alert(data.error); return; }
         const m = data.metadata || {};
         document.getElementById('fileBanner').classList.remove('hidden');
-        document.getElementById('fileName').textContent = data.filename;
+        document.getElementById('fileName').textContent = data.custom_name || data.filename;
         document.getElementById('fileStats').textContent = `${m.materials || 0} materials | ${m.bom_items || 0} BOM | ${m.machines || 0} machines`;
         document.getElementById('kpi-mat').textContent = m.materials || '-';
         document.getElementById('kpi-bom').textContent = m.bom_items || '-';
@@ -1486,6 +1491,18 @@ async function switchSession(sessionId) {
         log('Switched to: ' + data.filename);
         await loadSessions();
     } catch (err) { alert('Switch error: ' + err); }
+}
+
+function renameSession(sessionId, currentName) {
+    const newName = prompt('Enter a name for this case:', currentName);
+    if (newName === null || newName.trim() === '') return;
+    fetch('/api/sessions/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId, name: newName.trim()})
+    })
+    .then(r => r.json())
+    .then(data => { if (data.success) loadSessions(); });
 }
 
 async function deleteSession(sessionId) {
