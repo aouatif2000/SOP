@@ -105,9 +105,9 @@ class InventoryEngine:
         if lot_size <= 0:
             lot_size = 1.0
 
-        # Purchase receipt ceiling multiple
+        # Purchase receipt ceiling multiple (VBA: XLOOKUP to Purchase sheet col 7 = MOQ/lot size)
         in_purchase_sheet = mat_num in self.data.purchase_sheet_materials
-        purch_ceil_multiple = lot_size if in_purchase_sheet else 1.0
+        purch_ceil_multiple = self.data.get_purchase_moq(mat_num) if in_purchase_sheet else 1.0
 
         has_routing = len(self.data.get_all_routings(mat_num)) > 0
         is_bom_parent = any(b.parent_material == mat_num for b in self.data.bom if not b.is_coproduct)
@@ -146,7 +146,7 @@ class InventoryEngine:
                         prod_qty = ceiling_multiple(prod_need, bom_header_qty)
                     purch_need = raw_need - prod_qty
                     if purch_need > 0 and i >= lead_time:
-                        purch_qty = ceiling_multiple(purch_need, bom_header_qty)
+                        purch_qty = ceiling_multiple(purch_need, self.data.get_purchase_moq(mat_num))
 
             elif needs_production:
                 if raw_need > 0:
@@ -162,6 +162,30 @@ class InventoryEngine:
                 purchase_receipt[period] = purch_qty
 
             running_stock = running_stock - demand + prod_qty + purch_qty
+
+        # === ProcessPurchaseReceipts: overwrite frozen/first-flexible months with actuals ===
+        if purchase_receipt is not None and mat_num in self.data.purchase_actuals:
+            actuals_map = self.data.purchase_actuals[mat_num]
+            for i, period in enumerate(self.periods):
+                if i < lead_time:
+                    # Frozen period: always use actual PO qty (0 if no PO)
+                    purchase_receipt[period] = actuals_map.get(period, 0.0)
+                elif i == lead_time:
+                    # First flexible month: use actual if available
+                    if period in actuals_map:
+                        purchase_receipt[period] = actuals_map[period]
+                else:
+                    break  # heuristic values kept for remaining months
+
+            # Recalculate inventory balance after overlaying actuals
+            running_stock = initial_stock
+            for period in self.periods:
+                demand = total_demand.get(period, 0.0)
+                prod = production_plan.get(period, 0.0) if production_plan else 0.0
+                purch = purchase_receipt.get(period, 0.0)
+                running_stock = running_stock - demand + prod + purch
+                # Update production_plan running stock tracking is implicit;
+                # the inventory row recalculation below will use corrected values.
 
         # === Create Line 06 rows ===
         if production_plan is not None:

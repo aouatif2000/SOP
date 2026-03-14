@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>S&OP Planning Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
     <style>
         body { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); min-height: 100vh; }
         .card { background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(255, 255, 255, 0.1); }
@@ -28,10 +28,96 @@
         .consol-asset { border-left: 3px solid #6366f1; }
         .consol-roce { border-left: 3px solid #ec4899; }
         .consol-separator { border-top: 2px solid rgba(255,255,255,0.2); }
+        /* ===== INVENTORY HEATMAP ===== */
+        .hm-table { font-size: 11px; border-collapse: collapse; }
+        .hm-table th { background: rgba(59,130,246,0.18); position: sticky; top: 0; z-index: 5; padding: 4px 7px; font-size: 10px; color: #94a3b8; white-space: nowrap; }
+        .hm-table td { padding: 3px 6px; border: 1px solid rgba(255,255,255,0.06); white-space: nowrap; }
+        .hm-mat { position: sticky; left: 0; z-index: 4; background: #0f172a; min-width: 110px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; color: #cbd5e1; }
+        .hm-under    { background: rgba(255,205,210,0.55); color: #b91c1c; font-weight: 600; }
+        .hm-safety   { background: rgba(187,222,251,0.55); color: #1565c0; }
+        .hm-strategic{ background: rgba(179,229,252,0.45); color: #0277bd; }
+        .hm-normal   { background: rgba(200,230,201,0.55); color: #2e7d32; }
+        .hm-overstock{ background: rgba(255,100,100,0.45); color: #7f1d1d; font-weight: 700; }
+        .hm-zero     { background: rgba(100,116,139,0.12); color: #475569; }
         .cell-edited { background: rgba(255, 235, 59, 0.25) !important; }
         .cell-increased { background: rgba(200, 230, 201, 0.35) !important; font-weight: 700; }
         .cell-decreased { background: rgba(255, 205, 210, 0.35) !important; font-weight: 700; }
         .edit-mode-active { outline: 2px solid #FFEB3B; }
+        /* ===== EDITABLE CELLS ===== */
+        .editable-cell { cursor: text; }
+        .editable-cell:focus { outline: 2px solid #3b82f6; background: rgba(59,130,246,0.10); }
+        @keyframes cellFlash { 0%{background:rgba(59,130,246,0.35)} 100%{background:transparent} }
+        .cell-flash { animation: cellFlash 0.55s ease-out; }
+        /* ===== EDIT INDICATORS ===== */
+        .cell-edited     { background: rgba(255, 249, 196, 0.30) !important; }
+        .cell-increased  { background: rgba(200, 230, 201, 0.35) !important; }
+        .cell-decreased  { background: rgba(255, 205, 210, 0.35) !important; }
+        .cell-cascade-up   { background: rgba(200, 230, 201, 0.15) !important; }
+        .cell-cascade-down { background: rgba(255, 205, 210, 0.15) !important; }
+        .cell-indicator { pointer-events: none; font-size: 9px; margin-left: 2px; vertical-align: middle; }
+        /* ===== TOOLTIP ===== */
+        #planTooltip {
+            position: fixed; z-index: 9999;
+            background: #1e293b; border: 1px solid rgba(255,255,255,0.15);
+            color: #e2e8f0; font-size: 11px; padding: 5px 9px;
+            border-radius: 6px; pointer-events: none;
+            white-space: nowrap; display: none;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        /* ===== EDIT SUMMARY BAR ===== */
+        #editSummaryBar {
+            display: none; align-items: center; gap: 8px;
+            background: rgba(255,235,59,0.12); border: 1px solid rgba(255,235,59,0.3);
+            border-radius: 7px; padding: 4px 10px; font-size: 12px; color: #fde68a;
+        }
+        /* ===== SIDEBAR LAYOUT ===== */
+        #app-layout { display: flex; align-items: flex-start; }
+        #sidebar-wrapper { position: relative; flex-shrink: 0; }
+        #sidebar {
+            width: 280px; background: #0b1629;
+            border-right: 1px solid rgba(255,255,255,0.09);
+            transition: width 0.22s ease;
+            overflow: hidden;
+            min-height: calc(100vh - 44px);
+        }
+        #sidebar.collapsed { width: 0; }
+        #sidebar-inner { width: 280px; min-height: calc(100vh - 44px); overflow-y: auto; padding-bottom: 24px; }
+        #sidebarToggle {
+            position: absolute; right: -14px; top: 14px; z-index: 41;
+            background: #1e3a5f; border: 1px solid rgba(255,255,255,0.2);
+            color: #94a3b8; width: 28px; height: 28px; border-radius: 50%;
+            cursor: pointer; font-size: 11px; display: flex;
+            align-items: center; justify-content: center; padding: 0;
+            transition: background 0.15s;
+        }
+        #sidebarToggle:hover { background: #2563eb; color: #fff; }
+        #main-content { flex: 1; min-width: 0; overflow: hidden; }
+        .drop-zone {
+            border: 2px dashed rgba(59,130,246,0.4); border-radius: 8px;
+            padding: 14px 10px; text-align: center; cursor: pointer;
+            color: #64748b; font-size: 12px; transition: all 0.18s; margin: 10px;
+        }
+        .drop-zone.dragover { border-color: #3b82f6; background: rgba(59,130,246,0.09); color: #93c5fd; }
+        .session-group-header {
+            padding: 8px 12px 3px; font-size: 10px; font-weight: 700;
+            color: #475569; text-transform: uppercase; letter-spacing: 0.07em;
+            border-top: 1px solid rgba(255,255,255,0.06); margin-top: 6px;
+        }
+        .session-item {
+            display: flex; align-items: center; padding: 7px 10px;
+            cursor: pointer; border-radius: 6px; margin: 2px 6px;
+            transition: background 0.14s; gap: 7px;
+            border: 1px solid transparent;
+        }
+        .session-item:hover { background: rgba(59,130,246,0.1); }
+        .session-item.active { background: rgba(59,130,246,0.18); border-color: rgba(59,130,246,0.35); }
+        .session-badge { font-size: 9px; padding: 1px 6px; border-radius: 9999px; flex-shrink: 0; font-weight: 600; }
+        .session-badge.calculated { background: rgba(34,197,94,0.18); color: #86efac; }
+        .session-badge.pending { background: rgba(100,116,139,0.18); color: #94a3b8; }
+        .session-delete { margin-left: auto; color: #374151; font-size: 13px; flex-shrink: 0;
+            line-height: 1; padding: 1px 4px; border-radius: 3px; background: none; border: none; cursor: pointer; }
+        .session-delete:hover { color: #f87171; background: rgba(239,68,68,0.12); }
+        /* ===== END SIDEBAR LAYOUT ===== */
     </style>
 </head>
 <body class="text-gray-100">
@@ -62,6 +148,25 @@
             </div>
         </div>
     </header>
+    <div id="app-layout" style="display:flex;align-items:flex-start">
+      <div id="sidebar-wrapper">
+        <div id="sidebar">
+          <div id="sidebar-inner">
+            <div style="padding:10px 12px 8px;font-size:13px;font-weight:600;color:#94a3b8;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;gap:8px">&#128193; Files</div>
+            <div id="sidebarDropZone" class="drop-zone"
+                 ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+              <div style="font-size:20px;margin-bottom:5px">&#128193;</div>
+              Drag &amp; drop .xlsm / .xlsx here
+              <label style="display:block;cursor:pointer;color:#3b82f6;font-size:11px;text-decoration:underline;margin-top:5px">or browse
+                <input type="file" accept=".xlsx,.xlsm" class="hidden" id="sidebarFileInput" onchange="uploadFileFromSidebar(event)">
+              </label>
+            </div>
+            <div id="sessionList"><p style="padding:16px;color:#475569;font-size:12px;text-align:center">No files loaded yet</p></div>
+          </div>
+        </div>
+        <button id="sidebarToggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9668;</button>
+      </div><!-- /sidebar-wrapper -->
+      <div id="main-content">
     <div id="fileBanner" class="hidden bg-blue-900/50 border-b border-blue-700 py-2 px-4">
         <span class="text-blue-300"><strong id="fileName">-</strong></span>
         <span class="text-blue-400 text-sm ml-4" id="fileStats">-</span>
@@ -82,16 +187,84 @@
 
         <!-- Dashboard Tab -->
         <div id="dashboard-tab" class="tab-content">
-            <div class="grid grid-cols-4 gap-4 mb-6">
-                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Materials</p><p class="text-3xl font-bold text-blue-400" id="kpi-mat">-</p></div>
-                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Avg Utilization</p><p class="text-3xl font-bold text-green-400" id="kpi-util">-</p></div>
-                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">BOM Items</p><p class="text-3xl font-bold text-yellow-400" id="kpi-bom">-</p></div>
-                <div class="kpi-card rounded-xl p-6"><p class="text-slate-400 text-sm">Line Types</p><p class="text-3xl font-bold text-red-400" id="kpi-lt">-</p></div>
+            <!-- KPI Row -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="card rounded-xl p-5" style="border-color:rgba(59,130,246,0.45)">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide font-semibold">Materials</p>
+                    <p class="text-3xl font-bold text-blue-400 mt-1" id="kpi-mat">-</p>
+                    <p class="text-slate-500 text-xs mt-1">active SKUs</p>
+                </div>
+                <div class="card rounded-xl p-5" style="border-color:rgba(34,197,94,0.45)">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide font-semibold">Avg Utilization</p>
+                    <p class="text-3xl font-bold text-green-400 mt-1" id="kpi-util">-</p>
+                    <p class="text-slate-500 text-xs mt-1">across all machines</p>
+                </div>
+                <div class="card rounded-xl p-5" style="border-color:rgba(249,115,22,0.45)">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide font-semibold">Total FTE</p>
+                    <p class="text-3xl font-bold text-orange-400 mt-1" id="kpi-fte">-</p>
+                    <p class="text-slate-500 text-xs mt-1">latest period</p>
+                </div>
+                <div class="card rounded-xl p-5" style="border-color:rgba(239,68,68,0.45)">
+                    <p class="text-slate-400 text-xs uppercase tracking-wide font-semibold">Overstock Value</p>
+                    <p class="text-3xl font-bold text-red-400 mt-1" id="kpi-overstock">-</p>
+                    <p class="text-slate-500 text-xs mt-1">total EUR</p>
+                </div>
             </div>
+            <!-- Charts Row -->
             <div class="grid grid-cols-2 gap-6">
-                <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Utilization by Machine</h3><canvas id="utilChart" height="200"></canvas></div>
-                <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Summary by Line Type (All 14)</h3><div id="summaryDiv" class="overflow-auto max-h-96 text-sm"></div></div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-1">Utilization by Machine <span class="text-xs font-normal text-slate-500">(first 6 periods)</span></h3>
+                    <div class="flex gap-3 items-center mb-3 text-xs text-slate-400">
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgb(255,199,206)"></span> &gt;100%</span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgb(255,200,150)"></span> &lt;30%</span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgba(134,239,172,0.8)"></span> normal</span>
+                    </div>
+                    <canvas id="utilChart" height="220"></canvas>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">FTE Requirements by Group</h3>
+                    <canvas id="fteChart" height="220"></canvas>
+                </div>
             </div>
+            <!-- Inventory Heatmap + Top 10 Overstocks Row -->
+            <div class="grid grid-cols-2 gap-6 mt-6">
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-1">Inventory Quality Heatmap
+                        <span class="text-xs font-normal text-slate-500 ml-2">(dominant category per period)</span>
+                    </h3>
+                    <div class="flex gap-3 flex-wrap mb-3 text-xs">
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;background:rgba(255,205,210,0.55)"></span><span class="text-slate-400">Under</span></span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;background:rgba(187,222,251,0.55)"></span><span class="text-slate-400">Safety</span></span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;background:rgba(179,229,252,0.45)"></span><span class="text-slate-400">Strategic</span></span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;background:rgba(200,230,201,0.55)"></span><span class="text-slate-400">Normal</span></span>
+                        <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;background:rgba(255,100,100,0.45)"></span><span class="text-slate-400">Overstock</span></span>
+                    </div>
+                    <div id="invHeatmapWrap" class="overflow-auto" style="max-height:320px">
+                        <p class="text-slate-500 text-sm">Run calculations to see heatmap</p>
+                    </div>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Top 10 Overstocks <span class="text-xs font-normal text-slate-500">(total EUR)</span></h3>
+                    <canvas id="overstocksChart" height="250"></canvas>
+                </div>
+            </div>
+            <!-- Financial Metrics + ROCE Row -->
+            <div class="grid grid-cols-2 gap-6 mt-6">
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Projected Financial Metrics <span class="text-xs font-normal text-slate-500">(000s EUR)</span></h3>
+                    <canvas id="financialChart" height="220"></canvas>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-1">Monthly ROCE %
+                        <span class="text-xs font-normal text-slate-500 ml-2">— 15% target</span>
+                    </h3>
+                    <canvas id="roceChart" height="220"></canvas>
+                </div>
+            </div>
+            <!-- backward-compat hidden elements -->
+            <span id="kpi-bom" class="hidden"></span>
+            <span id="kpi-lt" class="hidden"></span>
+            <div id="summaryDiv" class="hidden"></div>
         </div>
 
         <!-- Planning Tab -->
@@ -100,16 +273,20 @@
                 <div class="flex justify-between mb-4 flex-wrap gap-2">
                     <h3 class="font-semibold">Planning Results (Python Calculated)</h3>
                     <div class="flex gap-2 flex-wrap items-center">
-                        <button id="editModeBtn" onclick="toggleEditMode()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">Edit Volumes</button>
-                        <button onclick="resetAllEdits()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">&#8634; Reset All Edits</button>
+                        <div id="editSummaryBar">
+                            <span>&#9998;</span>
+                            <span id="editSummaryCount">0 edits</span>
+                            <button onclick="resetAllEdits()" class="ml-2 px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-300 hover:bg-red-800 hover:text-white" title="Recalculate from scratch">&#8634; Reset All</button>
+                        </div>
+                        <span class="text-xs text-slate-500 italic">Click L01/L06 cells to edit</span>
                         <span id="editBadge" class="bg-yellow-600 text-white text-xs px-2 py-0.5 rounded-full" style="display:none">0</span>
                         <button onclick="saveEditsJSON()" class="px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500">Save Edits JSON</button>
                         <label class="cursor-pointer px-3 py-1 rounded text-sm bg-slate-600 text-slate-300 hover:bg-slate-500" for="editsFileInput">Load Edits JSON</label>
-                        <select id="ltFilter" onchange="loadPlanningData()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
+                        <select id="ltFilter" onchange="filterTable()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
                         <input id="matSearch" onkeyup="filterTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
                     </div>
                 </div>
-                <div class="overflow-auto max-h-[500px]"><table class="data-table w-full"><thead id="planHead"></thead><tbody id="planBody"><tr><td colspan="10" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
+                <div id="planTableScroll" class="overflow-auto" style="max-height:62vh"><table class="data-table w-full"><thead id="planHead" style="position:sticky;top:0;z-index:10"></thead><tbody id="planBody"><tr><td colspan="20" class="text-center p-4 text-slate-500">Run calculations</td></tr></tbody></table></div>
                 <p class="mt-2 text-sm text-slate-400">Rows: <span id="rowCount">0</span></p>
             </div>
         </div>
@@ -195,13 +372,24 @@
             <div class="card rounded-xl p-6"><h3 class="font-semibold mb-4">Calculation Log</h3><div id="log" class="bg-slate-900 p-4 rounded-lg max-h-[500px] overflow-auto text-green-400"></div></div>
         </div>
     </main>
+      </div><!-- /main-content -->
+    </div><!-- /app-layout -->
     <footer class="fixed bottom-0 left-0 right-0 bg-slate-900/90 border-t border-slate-700 py-2 px-4">
         <span id="status" class="text-slate-400">Ready</span>
     </footer>
+    <!-- Tooltip element (shared, positioned via JS) -->
+    <div id="planTooltip"></div>
 <script>
-let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], editMode: false, cellEdits: {} };
+let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], cellEdits: {} };
 let utilChart = null;
+let fteChart = null;
+let overstocksChart = null;
+let financialChart = null;
+let roceChart = null;
 let finChart = null;
+let _planDelegationSetup = false;
+// previousValues[key] = float — snapshot before last updateTableFromResults call, for cascade detection
+let previousValues = {};
 
 function log(msg) { const d = document.getElementById('log'); d.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`; d.scrollTop = d.scrollHeight; }
 function status(msg) { document.getElementById('status').textContent = msg; }
@@ -234,20 +422,7 @@ function showTab(name, btn) {
 
 async function uploadFile(e) {
     const file = e.target.files[0]; if (!file) return;
-    status('Uploading...'); log('Uploading ' + file.name);
-    const formData = new FormData(); formData.append('file', file);
-    try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.error) { alert(data.error); return; }
-        document.getElementById('fileBanner').classList.remove('hidden');
-        document.getElementById('fileName').textContent = data.filename;
-        document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
-        document.getElementById('kpi-mat').textContent = data.summary.materials;
-        document.getElementById('kpi-bom').textContent = data.summary.bom_items;
-        document.getElementById('calcBtn').disabled = false;
-        log('Raw data loaded'); status('Click Calculate');
-    } catch (err) { alert('Error: ' + err); }
+    await _doUpload(file);
 }
 
 async function runCalc() {
@@ -262,9 +437,6 @@ async function runCalc() {
     status('Calculating...'); log('Starting Python engine...');
     // Reset client-side edit state before a fresh calculation
     state.cellEdits = {};
-    state.editMode = false;
-    const editBtn = document.getElementById('editModeBtn');
-    if (editBtn) { editBtn.textContent = 'Edit Volumes'; editBtn.classList.remove('edit-mode-active','text-yellow-300'); }
     updateEditBadge();
     log('Parameters: planning_month=' + planningMonth + ', months_actuals=' + monthsActuals + ', months_forecast=' + monthsForecast);
     try {
@@ -280,19 +452,18 @@ async function runCalc() {
         Object.entries(data.summary.line_types).forEach(([lt, c]) => log('  ' + lt + ': ' + c));
         await loadResults();
         await loadValueResults();
+        await renderDashboard();
         document.getElementById('exportBtn').disabled = false;
         document.getElementById('kpi-lt').textContent = data.summary.line_types_count;
         status('Done - ' + data.summary.total_rows + ' rows');
+        await loadSessions();
     } catch (err) { alert('Error: ' + err); }
 }
 
 async function loadResults() {
     const res = await fetch('/api/results'); const data = await res.json();
     state.results = data.results; state.periods = data.periods; state.lineTypes = Object.keys(data.results).sort();
-    const filter = document.getElementById('ltFilter');
-    filter.innerHTML = '<option value="all">All Line Types</option>';
-    state.lineTypes.forEach(lt => { const c = state.results[lt]?.length || 0; if (c > 0) filter.innerHTML += `<option value="${lt}">${lt} (${c})</option>`; });
-    updateDashboard(); loadPlanningData(); loadCapacityData(); loadInventoryData();
+    updateDashboard(); renderPlanningTable(state.results, state.periods); loadCapacityData(); loadInventoryData();
 }
 
 /* ===== VALUE PLANNING ===== */
@@ -438,159 +609,555 @@ function renderFinChart() {
 /* ===== END VALUE PLANNING ===== */
 
 function updateDashboard() {
-    let html = '<table class="w-full"><tr class="text-slate-400"><th class="text-left p-2">Line Type</th><th class="text-right p-2">Count</th></tr>';
-    state.lineTypes.forEach(lt => { html += `<tr><td class="p-2">${lt}</td><td class="text-right p-2">${state.results[lt]?.length || 0}</td></tr>`; });
-    html += '</table><p class="mt-4 text-green-400">All ' + state.lineTypes.length + ' line types generated</p>';
-    document.getElementById('summaryDiv').innerHTML = html;
-    loadUtilChart();
+    // Summary div is now hidden; just update line-type count badge if present
+    const sd = document.getElementById('summaryDiv');
+    if (sd) {
+        let html = '<table class="w-full"><tr class="text-slate-400"><th class="text-left p-2">Line Type</th><th class="text-right p-2">Count</th></tr>';
+        state.lineTypes.forEach(lt => { html += `<tr><td class="p-2">${lt}</td><td class="text-right p-2">${state.results[lt]?.length || 0}</td></tr>`; });
+        html += '</table>';
+        sd.innerHTML = html;
+    }
+    // Chart rendering delegated to renderDashboard()
 }
-async function loadUtilChart() {
-    try {
-        const res = await fetch('/api/capacity'); const data = await res.json();
-        const ctx = document.getElementById('utilChart').getContext('2d');
-        if (utilChart) utilChart.destroy();
-        const periods = data.periods.slice(0, 12);
-        const datasets = data.utilization.slice(0, 6).map((m, i) => ({ label: m.machine.substring(0, 15), data: periods.map(p => m.values[p] || 0), borderColor: ['#3b82f6','#22c55e','#eab308','#ef4444','#8b5cf6','#ec4899'][i], tension: 0.4 }));
-        utilChart = new Chart(ctx, { type: 'line', data: { labels: periods, datasets }, options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8' } } }, scales: { y: { beginAtZero: true, max: 150, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v + '%' } }, x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } } } } });
-        let total = 0, count = 0; data.utilization.forEach(m => { Object.values(m.values).forEach(v => { total += v; count++; }); });
-        document.getElementById('kpi-util').textContent = count > 0 ? (total / count).toFixed(1) + '%' : '0%';
-    } catch (err) { log('Chart error: ' + err); }
-}
-const EDITABLE_LINE_TYPES = ['01. Demand forecast', '05. Minimum target stock', '06. Production plan', '06. Purchase receipt'];
+async function loadUtilChart() { /* replaced by renderDashboard() */ }
 
-function loadPlanningData() {
-    if (!state.results) return;
-    const lt = document.getElementById('ltFilter').value;
-    const periods = state.periods.slice(0, 8);
-    document.getElementById('planHead').innerHTML = `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux Column</th><th>Aux 2</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
-    let items = lt === 'all' ? Object.values(state.results).flat() : (state.results[lt] || []);
-    // Sort: material number ascending, then line type ascending (01→12)
-    items = items.slice().sort((a, b) => {
-        const matCmp = a.material_number.localeCompare(b.material_number, undefined, { numeric: true });
-        if (matCmp !== 0) return matCmp;
-        return a.line_type.localeCompare(b.line_type);
+/* ========== DASHBOARD ========== */
+async function renderDashboard() {
+    try {
+        const res = await fetch('/api/dashboard');
+        const data = await res.json();
+        if (data.error) { log('Dashboard: ' + data.error); return; }
+        renderKPIs(data.kpis);
+        renderUtilizationChart(data.utilization_by_machine || [], data.periods || []);
+        renderFteChart(data.fte_by_group || [], data.periods || []);
+        renderInventoryHeatmap(data.inventory_quality || [], data.periods || []);
+        renderTop10Overstocks(data.top_10_overstocks || [], data.periods || []);
+        renderFinancialChart(data.financials || {}, data.periods || []);
+        renderRoceChart(data.financials || {}, data.periods || []);
+    } catch (err) { log('Dashboard error: ' + err); }
+}
+
+function renderKPIs(kpis) {
+    if (!kpis) return;
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    set('kpi-mat',       kpis.materials ?? '-');
+    set('kpi-util',      kpis.avg_utilization != null ? kpis.avg_utilization.toFixed(1) + '%' : '-');
+    set('kpi-fte',       kpis.total_fte != null ? kpis.total_fte.toFixed(1) : '-');
+    set('kpi-overstock', kpis.total_overstock != null ? fmtVal(kpis.total_overstock) : '-');
+}
+
+function renderUtilizationChart(machines, periods) {
+    const canvas = document.getElementById('utilChart');
+    if (!canvas) return;
+    if (utilChart) { utilChart.destroy(); utilChart = null; }
+    const displayPeriods = periods.slice(0, 6);
+    if (!machines.length || !displayPeriods.length) return;
+    // One dataset per machine; per-bar colors based on value vs thresholds
+    const lineColors = ['#3b82f6','#6366f1','#8b5cf6','#ec4899','#f97316','#eab308','#22c55e','#06b6d4'];
+    const datasets = machines.map((m, i) => ({
+        label: (m.machine || '').substring(0, 18),
+        data: displayPeriods.map(p => m.values[p] != null ? m.values[p] : 0),
+        backgroundColor: displayPeriods.map(p => {
+            const v = m.values[p] != null ? m.values[p] : 0;
+            if (v > 100) return 'rgba(255,199,206,0.90)';
+            if (v < 30)  return 'rgba(255,200,150,0.90)';
+            return 'rgba(134,239,172,0.70)';
+        }),
+        borderColor: displayPeriods.map(p => {
+            const v = m.values[p] != null ? m.values[p] : 0;
+            if (v > 100) return 'rgb(220,53,69)';
+            if (v < 30)  return 'rgb(200,130,30)';
+            return 'rgb(34,197,94)';
+        }),
+        borderWidth: 1,
+        borderRadius: 3,
+    }));
+    utilChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: { labels: displayPeriods, datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#94a3b8', boxWidth: 10, font: { size: 10 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%` } }
+            },
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v + '%' } },
+                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } }
+            }
+        }
+    });
+}
+
+function renderFteChart(fteGroups, periods) {
+    const canvas = document.getElementById('fteChart');
+    if (!canvas) return;
+    if (fteChart) { fteChart.destroy(); fteChart = null; }
+    if (!fteGroups.length || !periods.length) return;
+    const palette = ['#3b82f6','#22c55e','#eab308','#ef4444','#8b5cf6','#ec4899','#f97316','#06b6d4','#84cc16','#a78bfa'];
+    const datasets = fteGroups.map((g, i) => ({
+        label: (g.group || 'Group ' + (i+1)).substring(0, 22),
+        data: periods.map(p => g.values[p] != null ? g.values[p] : 0),
+        borderColor: palette[i % palette.length],
+        backgroundColor: palette[i % palette.length].replace(')', ',0.12)').replace('rgb(', 'rgba('),
+        borderWidth: 2,
+        tension: 0.3,
+        pointRadius: 3,
+        fill: false,
+    }));
+    fteChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels: periods, datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#94a3b8', boxWidth: 10, font: { size: 10 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} FTE` } }
+            },
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v.toFixed(1) } },
+                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } }
+            }
+        }
+    });
+}
+
+function renderInventoryHeatmap(invQuality, periods) {
+    const wrap = document.getElementById('invHeatmapWrap');
+    if (!wrap) return;
+    if (!invQuality || !invQuality.length) {
+        wrap.innerHTML = '<p class="text-slate-500 text-sm">Inventory quality data unavailable</p>';
+        return;
+    }
+    const CATS = ['overstock','under','safety','strategic','normal'];
+    const CAT_CLASS = { under:'hm-under', safety:'hm-safety', strategic:'hm-strategic', normal:'hm-normal', overstock:'hm-overstock' };
+    // Dominant category = largest absolute value among non-zero categories
+    function dominant(pData) {
+        let best = '', bestV = 0;
+        for (const c of CATS) {
+            const v = Math.abs(pData[c] || 0);
+            if (v > bestV) { bestV = v; best = c; }
+        }
+        return bestV === 0 ? 'zero' : best;
+    }
+    let html = '<table class="hm-table w-full"><thead><tr>';
+    html += '<th class="hm-mat">Material</th>';
+    periods.forEach(p => { html += `<th>${p}</th>`; });
+    html += '</tr></thead><tbody>';
+    for (const mat of invQuality) {
+        html += '<tr>';
+        const shortName = ((mat.material_name || mat.material_number) + '').substring(0, 18);
+        html += `<td class="hm-mat" title="${mat.material_number} — ${mat.material_name || ''}">${shortName}</td>`;
+        for (const p of periods) {
+            const pData = (mat.periods && mat.periods[p]) || {};
+            const dom = dominant(pData);
+            const cls = dom === 'zero' ? 'hm-zero' : (CAT_CLASS[dom] || '');
+            const inv = pData.inventory != null ? fmtVal(pData.inventory) : '-';
+            const tt = dom === 'zero' ? 'No stock' :
+                `Under:${fmtVal(pData.under||0)} | Safety:${fmtVal(pData.safety||0)} | Strat:${fmtVal(pData.strategic||0)} | Normal:${fmtVal(pData.normal||0)} | OS:${fmtVal(pData.overstock||0)}`;
+            html += `<td class="${cls}" title="${tt}">${inv}</td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+}
+
+function renderTop10Overstocks(top10, periods) {
+    const canvas = document.getElementById('overstocksChart');
+    if (!canvas) return;
+    if (overstocksChart) { overstocksChart.destroy(); overstocksChart = null; }
+    if (!top10 || !top10.length) return;
+    const sorted = top10.slice().sort((a, b) => (a.total_overstock || 0) - (b.total_overstock || 0)); // ascending for horizontal bars
+    const labels = sorted.map(m => ((m.material_name || m.material_number) + '').substring(0, 20));
+    const values = sorted.map(m => m.total_overstock || 0);
+    overstocksChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                label: 'Overstock (EUR)',
+                data: values,
+                backgroundColor: 'rgba(239,68,68,0.65)',
+                borderColor: 'rgba(239,68,68,1)',
+                borderWidth: 1,
+                borderRadius: 3,
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: ctx => ' ' + fmtVal(ctx.parsed.x) + ' EUR' } }
+            },
+            scales: {
+                x: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => fmtVal(v) } },
+                y: { grid: { display: false }, ticks: { color: '#e2e8f0', font: { size: 10 } } }
+            }
+        }
+    });
+}
+
+function renderFinancialChart(financials, periods) {
+    const canvas = document.getElementById('financialChart');
+    if (!canvas) return;
+    if (financialChart) { financialChart.destroy(); financialChart = null; }
+    if (!financials || !periods.length) return;
+    const METRICS = [
+        { key: 'TURNOVER',          color: '#22c55e',  label: 'Turnover' },
+        { key: 'COST OF GOODS',     color: '#f97316',  label: 'Cost of Goods' },
+        { key: 'GROSS MARGIN',      color: '#3b82f6',  label: 'Gross Margin' },
+        { key: 'EBIT',              color: '#eab308',  label: 'EBIT' },
+        { key: 'INVENTORY VALUE',   color: '#8b5cf6',  label: 'Inventory Value' },
+    ];
+    const datasets = METRICS
+        .filter(m => financials[m.key])
+        .map(m => ({
+            label: m.label,
+            data: periods.map(p => (financials[m.key][p] || 0) / 1000),
+            borderColor: m.color,
+            backgroundColor: m.color.replace('#', 'rgba(') + ',0.08)',  // fallback; overridden below
+            borderWidth: 2,
+            tension: 0.3,
+            pointRadius: 3,
+            fill: false,
+        }));
+    financialChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels: periods, datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#94a3b8', boxWidth: 10, font: { size: 10 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)}K` } }
+            },
+            scales: {
+                y: { grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v.toFixed(0) + 'K' } },
+                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } }
+            }
+        }
+    });
+}
+
+function renderRoceChart(financials, periods) {
+    const canvas = document.getElementById('roceChart');
+    if (!canvas) return;
+    if (roceChart) { roceChart.destroy(); roceChart = null; }
+    if (!financials || !periods.length || !financials['ROCE']) return;
+    const roceVals = periods.map(p => ((financials['ROCE'][p] || 0) * 100));
+    const target15 = periods.map(() => 15);
+    // Color each bar: green ≥15%, yellow 8–15%, red <8%
+    const barColors = roceVals.map(v =>
+        v >= 15 ? 'rgba(34,197,94,0.70)' :
+        v >= 8  ? 'rgba(234,179,8,0.70)' :
+                  'rgba(239,68,68,0.70)'
+    );
+    roceChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: periods,
+            datasets: [
+                {
+                    label: 'ROCE %',
+                    data: roceVals,
+                    backgroundColor: barColors,
+                    borderColor: barColors.map(c => c.replace('0.70)', '1)')),
+                    borderWidth: 1,
+                    borderRadius: 3,
+                    order: 2,
+                },
+                {
+                    label: '15% Target',
+                    data: target15,
+                    type: 'line',
+                    borderColor: 'rgba(239,68,68,0.85)',
+                    borderWidth: 2,
+                    borderDash: [6, 4],
+                    pointRadius: 0,
+                    fill: false,
+                    order: 1,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#94a3b8', boxWidth: 10, font: { size: 10 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%` } }
+            },
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', callback: v => v.toFixed(0) + '%' } },
+                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } }
+            }
+        }
+    });
+}
+/* ========== END DASHBOARD ========== */
+const PLAN_EDITABLE = new Set(['01. Demand forecast', '06. Production plan']);
+
+function renderPlanningTable(results, periods) {
+    if (!results) return;
+    // Populate line type filter
+    const ltSel = document.getElementById('ltFilter');
+    const prevLt = ltSel ? ltSel.value : 'all';
+    if (ltSel) {
+        ltSel.innerHTML = '<option value="all">All Line Types</option>';
+        Object.keys(results).sort().forEach(lt => {
+            const c = results[lt]?.length || 0;
+            if (c > 0) ltSel.innerHTML += `<option value="${lt}">${lt} (${c})</option>`;
+        });
+        if (ltSel.querySelector(`option[value="${prevLt}"]`)) ltSel.value = prevLt;
+    }
+    // Build sticky header — all periods
+    document.getElementById('planHead').innerHTML =
+        `<tr class="text-slate-400"><th>Material</th><th>Name</th><th>Line Type</th><th>Aux</th><th>Aux 2</th><th>Start</th>${periods.map(p => `<th class="text-right">${p}</th>`).join('')}</tr>`;
+    // Collect + sort all rows
+    let items = Object.values(results).flat().slice().sort((a, b) => {
+        const m = a.material_number.localeCompare(b.material_number, undefined, { numeric: true });
+        return m !== 0 ? m : a.line_type.localeCompare(b.line_type);
     });
     document.getElementById('rowCount').textContent = items.length;
-    const isEditable = (lineType) => state.editMode && EDITABLE_LINE_TYPES.includes(lineType);
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
     let html = items.map(item => {
-        const periodCells = periods.map(p => {
-            const key = `${item.line_type}||${item.material_number}||${p}`;
-            const edit = state.cellEdits[key];
-            const val = item.values[p] || 0;
-            let cls = 'text-right';
-            let indicator = '';
-            let tooltip = '';
-            if (edit) {
-                if (edit.new > edit.original) { cls += ' cell-increased'; indicator = ' &#9650;'; }
-                else if (edit.new < edit.original) { cls += ' cell-decreased'; indicator = ' &#9660;'; }
-                else { cls += ' cell-edited'; }
-                tooltip = ` title="Original: ${edit.original}\nNew: ${edit.new}\nDelta: ${edit.delta_pct}%"`;
-            }
-            if (isEditable(item.line_type)) {
-                const esc = (s) => String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-                return `<td class="${cls}" data-key="${esc(key)}" data-matnum="${esc(item.material_number)}" data-lt="${esc(item.line_type)}" data-period="${esc(p)}" ondblclick="startCellEdit(this)" style="cursor:pointer"${tooltip}>${fmt(val)}${indicator}</td>`;
-            }
-            return `<td class="${cls}"${tooltip}>${fmt(val)}${indicator}</td>`;
-        }).join('');
+        const isEdit = PLAN_EDITABLE.has(item.line_type);
         const a2raw = item.aux_2_column || '';
         const a2flag = a2raw.endsWith('!');
         const a2disp = a2flag ? a2raw.slice(0, -1) + ' ⚠' : (a2raw || '-');
         const a2style = a2flag ? ' style="background:rgba(255,199,206,0.25)"' : '';
-        return `<tr><td class="font-mono">${item.material_number}</td><td>${(item.material_name || '').substring(0, 20)}</td><td class="text-xs">${item.line_type}</td><td class="text-yellow-400">${item.aux_column || '-'}</td><td class="text-blue-400"${a2style}>${a2disp}</td>${periodCells}</tr>`;
+        const periodCells = periods.map(p => {
+            const key = `${item.line_type}||${item.material_number}||${p}`;
+            const manualEdit = item.manual_edits && item.manual_edits[p];
+            const val = item.values[p] || 0;
+            let cls = 'text-right';
+            let indicator = '';
+            let ttOrig = '', ttNew = '', ttDelta = '';
+            if (manualEdit) {
+                const orig = manualEdit.original;
+                const nv   = manualEdit.new !== undefined ? manualEdit.new : val;
+                const dp   = orig !== 0 ? ((nv - orig) / Math.abs(orig) * 100).toFixed(1) : '0.0';
+                ttOrig  = fmt(orig); ttNew = fmt(nv); ttDelta = dp;
+                if (nv > orig) { cls += ' cell-increased'; indicator = '<span class="cell-indicator" style="color:#388e3c">&#9650;</span>'; }
+                else if (nv < orig) { cls += ' cell-decreased'; indicator = '<span class="cell-indicator" style="color:#c62828">&#9660;</span>'; }
+                else { cls += ' cell-edited'; }
+            }
+            const ttAttrs = manualEdit
+                ? ` data-tt-orig="${esc(ttOrig)}" data-tt-new="${esc(ttNew)}" data-tt-delta="${esc(ttDelta)}"`
+                : '';
+            if (isEdit)
+                return `<td class="${cls} editable-cell" contenteditable="true" data-key="${esc(key)}" data-matnum="${esc(item.material_number)}" data-lt="${esc(item.line_type)}" data-period="${esc(p)}"${ttAttrs}>${fmt(val)}${indicator}</td>`;
+            return `<td class="${cls}" data-key="${esc(key)}" data-period="${esc(p)}"${ttAttrs}>${fmt(val)}${indicator}</td>`;
+        }).join('');
+        return `<tr data-material="${esc(item.material_number)}" data-linetype="${esc(item.line_type)}">`
+            + `<td class="font-mono text-xs">${item.material_number}</td>`
+            + `<td>${(item.material_name||'').substring(0,20)}</td>`
+            + `<td class="text-xs">${item.line_type}</td>`
+            + `<td class="text-yellow-400">${item.aux_column||'-'}</td>`
+            + `<td class="text-blue-400"${a2style}>${a2disp}</td>`
+            + `<td class="text-right">${item.starting_stock ? fmt(item.starting_stock) : '-'}</td>`
+            + `${periodCells}</tr>`;
     }).join('');
-    document.getElementById('planBody').innerHTML = html || '<tr><td colspan="14" class="text-center p-4">No data</td></tr>';
+    document.getElementById('planBody').innerHTML = html || '<tr><td colspan="20" class="text-center p-4 text-slate-500">No data</td></tr>';
+    // Snapshot current values for cascade detection on next update
+    previousValues = {};
+    items.forEach(item => {
+        periods.forEach(p => {
+            previousValues[`${item.line_type}||${item.material_number}||${p}`] = item.values[p] || 0;
+        });
+    });
+    if (!_planDelegationSetup) { _setupPlanTableDelegation(); _planDelegationSetup = true; }
     filterTable();
 }
 
-function toggleEditMode() {
-    state.editMode = !state.editMode;
-    const btn = document.getElementById('editModeBtn');
-    if (btn) {
-        btn.textContent = state.editMode ? 'Editing ON' : '\u270F\uFE0F Edit Volumes';
-        btn.classList.toggle('edit-mode-active', state.editMode);
-        btn.classList.toggle('text-yellow-300', state.editMode);
-    }
-    loadPlanningData();
-}
-
-function startCellEdit(cell) {
-    if (!state.editMode) return;
-    const matNum = cell.dataset.matnum;
-    const lt = cell.dataset.lt;
-    const period = cell.dataset.period;
-    const key = cell.dataset.key;
-    const rows = state.results[lt] || [];
-    const row = rows.find(r => r.material_number === matNum);
-    const rawVal = row ? (row.values[period] || 0) : 0;
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.value = rawVal;
-    input.className = 'w-full bg-blue-900 text-white text-right rounded px-1 border border-blue-400 text-xs';
-    input.style.minWidth = '70px';
-    let done = false;
-    function doCommit() { if (done) return; done = true; commitCellEdit(cell, input, matNum, lt, period, key, rawVal); }
-    function doCancel() { if (done) return; done = true; cancelCellEdit(cell, rawVal, key); }
-    input.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); doCommit(); }
-        if (e.key === 'Escape') { e.preventDefault(); doCancel(); }
+function _setupPlanTableDelegation() {
+    const tbody = document.getElementById('planBody');
+    // Tooltip delegation
+    const tooltip = document.getElementById('planTooltip');
+    tbody.addEventListener('mouseover', function(e) {
+        const cell = e.target.closest('td[data-key]');
+        if (!cell || !tooltip) return;
+        const key = cell.dataset.key;
+        const ttOrig  = cell.dataset.ttOrig;
+        const ttNew   = cell.dataset.ttNew;
+        const ttDelta = cell.dataset.ttDelta;
+        const ttCascOrig = cell.dataset.ttCascOrig;
+        const ttCascNew  = cell.dataset.ttCascNew;
+        let text = '';
+        if (ttOrig !== undefined && ttNew !== undefined) {
+            const sign = parseFloat(ttDelta) >= 0 ? '+' : '';
+            text = `Original: ${ttOrig} | New: ${ttNew} | Delta: ${sign}${ttDelta}%`;
+        } else if (ttCascOrig !== undefined) {
+            text = `Changed by cascade: was ${ttCascOrig}, now ${ttCascNew}`;
+        }
+        if (!text) return;
+        tooltip.textContent = text;
+        tooltip.style.display = 'block';
     });
-    input.addEventListener('blur', doCommit);
-    cell.innerHTML = '';
-    cell.appendChild(input);
-    input.focus();
-    input.select();
+    tbody.addEventListener('mousemove', function(e) {
+        if (!tooltip || tooltip.style.display === 'none') return;
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top  = (e.clientY - 28) + 'px';
+    });
+    tbody.addEventListener('mouseout', function(e) {
+        if (tooltip) tooltip.style.display = 'none';
+    });
+    // focusin: show raw number for editing; store original on first focus
+    tbody.addEventListener('focusin', function(e) {
+        const cell = e.target.closest('td.editable-cell');
+        if (!cell) return;
+        const matNum = cell.dataset.matnum, lt = cell.dataset.lt, period = cell.dataset.period;
+        const rows = (state.results && state.results[lt]) || [];
+        const row = rows.find(r => r.material_number === matNum);
+        const rawVal = row ? (row.values[period] || 0) : 0;
+        if (!cell.hasAttribute('data-original')) cell.dataset.original = String(rawVal);
+        cell.textContent = String(rawVal);
+        // Select all for easy overwrite
+        const sel = window.getSelection(), range = document.createRange();
+        range.selectNodeContents(cell); sel.removeAllRanges(); sel.addRange(range);
+    });
+    // focusout: commit if changed
+    tbody.addEventListener('focusout', function(e) {
+        const cell = e.target.closest('td.editable-cell');
+        if (!cell || !cell.hasAttribute('data-original')) return;
+        const newValue = parseFloat(cell.textContent.trim());
+        const origVal  = parseFloat(cell.dataset.original);
+        if (isNaN(newValue)) { cell.textContent = fmt(origVal); return; }
+        if (Math.abs(newValue - origVal) < 0.0001) { cell.textContent = fmt(newValue); return; }
+        _commitPlanEdit(cell, cell.dataset.matnum, cell.dataset.lt, cell.dataset.period, newValue, origVal, cell.dataset.key);
+    });
+    // keyboard: Enter = commit (blur), Escape = cancel
+    tbody.addEventListener('keydown', function(e) {
+        const cell = e.target.closest('td.editable-cell');
+        if (!cell) return;
+        if (e.key === 'Enter') { e.preventDefault(); cell.blur(); }
+        else if (e.key === 'Escape') {
+            const origVal = parseFloat(cell.dataset.original || '0');
+            cell.textContent = fmt(origVal);
+            cell.removeAttribute('data-original');
+            cell.blur();
+        }
+    });
 }
 
-async function commitCellEdit(cell, input, matNum, lt, period, key, rawVal) {
-    const newValue = parseFloat(input.value);
-    if (isNaN(newValue)) { cancelCellEdit(cell, rawVal, key); return; }
+async function _commitPlanEdit(cell, matNum, lt, period, newValue, origVal, key) {
+    cell.textContent = fmt(newValue); // optimistic
     try {
         const res = await fetch('/api/update_volume', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ line_type: lt, material_number: matNum, period, new_value: newValue })
         });
         const data = await res.json();
-        if (data.error) { alert(data.error); cancelCellEdit(cell, rawVal, key); return; }
-        state.results = data.results;
-        state.valueResults = data.value_results;
-        state.consolidation = data.consolidation;
+        if (data.error) { alert(data.error); cell.textContent = fmt(origVal); return; }
+        state.results = data.results; state.valueResults = data.value_results; state.consolidation = data.consolidation;
         state.cellEdits[key] = { original: data.edit_meta.old_value, new: data.edit_meta.new_value, delta_pct: data.edit_meta.delta_pct };
-        refreshAllTabs();
-    } catch (err) { alert('Error: ' + err); cancelCellEdit(cell, rawVal, key); }
+        cell.dataset.original = String(newValue);
+        updateTableFromResults(data.results, data.value_results);
+        renderDashboard();
+    } catch(err) { alert('Error: ' + err); cell.textContent = fmt(origVal); }
 }
 
-function cancelCellEdit(cell, rawVal, key) {
-    const edit = state.cellEdits[key];
-    let cls = 'text-right';
-    let indicator = '';
-    if (edit) {
-        if (edit.new > edit.original) { cls += ' cell-increased'; indicator = ' &#9650;'; }
-        else if (edit.new < edit.original) { cls += ' cell-decreased'; indicator = ' &#9660;'; }
-        else { cls += ' cell-edited'; }
+function updateTableFromResults(results, valueResults) {
+    if (!results) return;
+    const tbody = document.getElementById('planBody');
+    if (!tbody) return;
+    // Build key→value lookup from new results
+    const newVals = {};
+    for (const [lt, rows] of Object.entries(results))
+        for (const row of rows)
+            for (const [p, v] of Object.entries(row.values || {}))
+                newVals[`${lt}||${row.material_number}||${p}`] = v;
+    // Update cells in-place
+    tbody.querySelectorAll('td[data-key]').forEach(cell => {
+        const key = cell.dataset.key;
+        if (!(key in newVals)) return;
+        // Never clobber the cell currently being edited
+        if (cell.classList.contains('editable-cell') && document.activeElement === cell) return;
+        const newV = newVals[key];
+        const newDisp = fmt(newV);
+        // Get current display value excluding indicator spans
+        const currentDisp = Array.from(cell.childNodes)
+            .filter(n => n.nodeType === Node.TEXT_NODE)
+            .map(n => n.textContent.trim()).join('');
+        if (currentDisp !== newDisp) {
+            // Clear text nodes only, keep spans momentarily; will be rebuilt below
+            Array.from(cell.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).forEach(n => n.remove());
+            cell.insertBefore(document.createTextNode(newDisp), cell.firstChild);
+            cell.classList.add('cell-flash');
+            setTimeout(() => cell.classList.remove('cell-flash'), 600);
+        }
+        ['cell-increased','cell-decreased','cell-edited','cell-cascade-up','cell-cascade-down'].forEach(c => cell.classList.remove(c));
+        // Remove old indicators
+        cell.querySelectorAll('.cell-indicator').forEach(s => s.remove());
+        // Find manual_edit for this cell from results
+        const [ltKey, matKey, pKey] = key.split('||');
+        const row = results[ltKey] && results[ltKey].find(r => r.material_number === matKey);
+        const manualEdit = row && row.manual_edits && row.manual_edits[pKey];
+        if (manualEdit) {
+            const orig = manualEdit.original;
+            const nv   = manualEdit.new !== undefined ? manualEdit.new : newV;
+            const dp   = orig !== 0 ? ((nv - orig) / Math.abs(orig) * 100).toFixed(1) : '0.0';
+            cell.dataset.ttOrig  = fmt(orig);
+            cell.dataset.ttNew   = fmt(nv);
+            cell.dataset.ttDelta = dp;
+            delete cell.dataset.ttCascOrig; delete cell.dataset.ttCascNew;
+            if (nv > orig) {
+                cell.classList.add('cell-increased');
+                const span = document.createElement('span');
+                span.className = 'cell-indicator'; span.style.color = '#388e3c'; span.innerHTML = '&#9650;';
+                cell.appendChild(span);
+            } else if (nv < orig) {
+                cell.classList.add('cell-decreased');
+                const span = document.createElement('span');
+                span.className = 'cell-indicator'; span.style.color = '#c62828'; span.innerHTML = '&#9660;';
+                cell.appendChild(span);
+            } else {
+                cell.classList.add('cell-edited');
+            }
+        } else if (key in previousValues) {
+            // Cascade detection: value changed from previous render but no manual edit
+            const prevV = previousValues[key];
+            if (Math.abs(newV - prevV) > 0.0001) {
+                cell.dataset.ttCascOrig = fmt(prevV);
+                cell.dataset.ttCascNew  = fmt(newV);
+                delete cell.dataset.ttOrig; delete cell.dataset.ttNew; delete cell.dataset.ttDelta;
+                if (newV > prevV) cell.classList.add('cell-cascade-up');
+                else cell.classList.add('cell-cascade-down');
+            }
+        }
+    });
+    // Update previousValues snapshot for next cascade detection
+    for (const [lt2, rows2] of Object.entries(results))
+        for (const row2 of rows2)
+            for (const [p2, v2] of Object.entries(row2.values || {}))
+                previousValues[`${lt2}||${row2.material_number}||${p2}`] = v2;
+    if (valueResults) {
+        state.valueResults = valueResults;
+        loadValuePlanningData(); renderConsolidation(); renderFinChart(); updateValueKPIs();
     }
-    cell.className = cls;
-    cell.innerHTML = fmt(rawVal) + indicator;
+    updateEditBadge();
 }
 
 function refreshAllTabs() {
     if (!state.results) return;
-    loadPlanningData();
-    if (state.valueResults) {
-        loadValuePlanningData();
-        renderConsolidation();
-        renderFinChart();
-        updateValueKPIs();
-    }
+    updateTableFromResults(state.results, state.valueResults || null);
     loadCapacityData();
     loadInventoryData();
-    updateEditBadge();
 }
 
 function updateEditBadge() {
     const count = Object.keys(state.cellEdits).length;
     const badge = document.getElementById('editBadge');
     if (badge) { badge.textContent = count; badge.style.display = count > 0 ? '' : 'none'; }
+    const bar = document.getElementById('editSummaryBar');
+    if (bar) {
+        bar.style.display = count > 0 ? 'flex' : 'none';
+        const countEl = document.getElementById('editSummaryCount');
+        if (countEl) countEl.textContent = count + (count === 1 ? ' edit' : ' edits');
+    }
     const exportBtn = document.getElementById('exportBtn');
     if (exportBtn) {
         exportBtn.textContent = count > 0 ? `Export with Edits (${count})` : 'Export';
@@ -648,7 +1215,15 @@ function resetAllEdits() {
 function current_engine_loaded() {
     return state.results !== null;
 }
-function filterTable() { const s = document.getElementById('matSearch').value.toLowerCase(); document.querySelectorAll('#planBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'; }); }
+function filterTable() {
+    const s  = document.getElementById('matSearch').value.toLowerCase();
+    const lt = document.getElementById('ltFilter').value;
+    document.querySelectorAll('#planBody tr').forEach(r => {
+        const matchSearch = !s || r.textContent.toLowerCase().includes(s);
+        const matchLt     = lt === 'all' || r.dataset.linetype === lt;
+        r.style.display = (matchSearch && matchLt) ? '' : 'none';
+    });
+}
 async function loadCapacityData() {
     try {
         const res = await fetch('/api/capacity'); const data = await res.json();
@@ -681,6 +1256,157 @@ function fmtVal(n) {
     if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + 'K';
     return sign + abs.toFixed(abs < 10 ? 2 : 0);
 }
+
+// ===== SESSION SIDEBAR =====
+async function _doUpload(file) {
+    status('Uploading ' + file.name + '...');
+    log('Uploading ' + file.name);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('fileBanner').classList.remove('hidden');
+        document.getElementById('fileName').textContent = data.filename;
+        document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
+        document.getElementById('kpi-mat').textContent = data.summary.materials;
+        document.getElementById('kpi-bom').textContent = data.summary.bom_items;
+        document.getElementById('calcBtn').disabled = false;
+        log('Raw data loaded: ' + data.filename);
+        status('Click Calculate');
+        await loadSessions();
+    } catch (err) { alert('Upload error: ' + err); }
+}
+
+async function uploadFileFromSidebar(e) {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    await _doUpload(file);
+}
+
+async function loadSessions() {
+    try {
+        const res = await fetch('/api/sessions');
+        const data = await res.json();
+        renderSessionList(data.groups || {}, data.active_session_id);
+    } catch (err) { /* silent on load */ }
+}
+
+function renderSessionList(groups, activeId) {
+    const container = document.getElementById('sessionList');
+    if (!container) return;
+    const keys = Object.keys(groups).sort().reverse(); // newest first
+    if (keys.length === 0) {
+        container.innerHTML = '<p style="padding:16px;color:#475569;font-size:12px;text-align:center">No files loaded yet</p>';
+        return;
+    }
+    let html = '';
+    for (const key of keys) {
+        // key is "YYYY/MM/SITE" from backend grouping
+        const parts = key.split('/');
+        const year = parts[0] || '';
+        const month = parts[1] || '';
+        const site = parts[2] || '';
+        let groupLabel = key;
+        if (year && month && !isNaN(parseInt(month))) {
+            const d = new Date(parseInt(year), parseInt(month) - 1, 1);
+            const mName = d.toLocaleString('en', { month: 'short' });
+            groupLabel = mName + ' ' + year + (site && site !== 'Unknown' ? ' \u2014 ' + site : '');
+        }
+        html += `<div class="session-group-header">${groupLabel}</div>`;
+        for (const sess of groups[key]) {
+            const isActive = sess.id === activeId;
+            const badgeCls = sess.calculated ? 'calculated' : 'pending';
+            const badgeTxt = sess.calculated ? 'Ready' : 'Pending';
+            const nameColor = isActive ? '#93c5fd' : '#e2e8f0';
+            const mats = (sess.metadata && sess.metadata.materials) || 0;
+            html += `<div class="session-item${isActive ? ' active' : ''}" onclick="switchSession('${sess.id}')">`
+                  + `<div style="flex:1;min-width:0">`
+                  + `<div style="font-size:12px;color:${nameColor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${sess.filename}">${sess.filename}</div>`
+                  + `<div style="font-size:10px;color:#64748b;margin-top:1px">${mats} materials</div>`
+                  + `</div>`
+                  + `<span class="session-badge ${badgeCls}">${badgeTxt}</span>`
+                  + `<button class="session-delete" onclick="event.stopPropagation();deleteSession('${sess.id}')" title="Remove">&#10005;</button>`
+                  + `</div>`;
+        }
+    }
+    container.innerHTML = html;
+}
+
+async function switchSession(sessionId) {
+    try {
+        const res = await fetch('/api/sessions/switch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId })
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        const m = data.metadata || {};
+        document.getElementById('fileBanner').classList.remove('hidden');
+        document.getElementById('fileName').textContent = data.filename;
+        document.getElementById('fileStats').textContent = `${m.materials || 0} materials | ${m.bom_items || 0} BOM | ${m.machines || 0} machines`;
+        document.getElementById('kpi-mat').textContent = m.materials || '-';
+        document.getElementById('kpi-bom').textContent = m.bom_items || '-';
+        document.getElementById('calcBtn').disabled = false;
+        if (data.calculated) {
+            await loadResults();
+            await loadValueResults();
+            document.getElementById('exportBtn').disabled = false;
+            status('Switched to: ' + data.filename);
+        } else {
+            state.results = null; state.valueResults = null; state.consolidation = [];
+            document.getElementById('exportBtn').disabled = true;
+            status('Switched to: ' + data.filename + ' (not yet calculated)');
+        }
+        log('Switched to: ' + data.filename);
+        await loadSessions();
+    } catch (err) { alert('Switch error: ' + err); }
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Remove this file from the session list?')) return;
+    try {
+        const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        log('Session removed.');
+        await loadSessions();
+    } catch (err) { alert('Delete error: ' + err); }
+}
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const btn = document.getElementById('sidebarToggle');
+    const collapsed = sidebar.classList.toggle('collapsed');
+    btn.innerHTML = collapsed ? '&#9658;' : '&#9668;';
+}
+
+function handleDragOver(e) {
+    e.preventDefault(); e.stopPropagation();
+    document.getElementById('sidebarDropZone').classList.add('dragover');
+}
+function handleDragLeave(e) {
+    e.preventDefault();
+    document.getElementById('sidebarDropZone').classList.remove('dragover');
+}
+async function handleDrop(e) {
+    e.preventDefault(); e.stopPropagation();
+    document.getElementById('sidebarDropZone').classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    const name = file.name.toLowerCase();
+    if (!name.endsWith('.xlsx') && !name.endsWith('.xlsm')) {
+        alert('Only .xlsx and .xlsm files are accepted.');
+        return;
+    }
+    await _doUpload(file);
+}
+// ===== END SESSION SIDEBAR =====
+
+loadSessions();
 </script>
 </body>
 </html>

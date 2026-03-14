@@ -39,6 +39,8 @@ class DataLoader:
         self.fte_hours_per_year: float = 1492
         self.shift_hours: Dict[str, float] = {}
         self.purchase_lead_times: Dict[str, int] = {}
+        self.purchase_moq: Dict[str, float] = {}
+        self.purchase_actuals: Dict[str, Dict[str, float]] = {}
         self.purchase_sheet_materials: Set[str] = set()
         self.purchased_and_produced: Dict[str, float] = {}
         self.bom_levels: Dict[str, int] = {}
@@ -62,6 +64,7 @@ class DataLoader:
         self._load_stock_levels()
         self._load_safety_stock()
         self._load_purchase_sheet()
+        self._load_purchase_actuals()
         self._calculate_bom_levels()
         self._load_avg_sales_price()
         self._load_cost_raw_material()
@@ -90,7 +93,7 @@ class DataLoader:
             forecast_months = 12
             forecast_actuals_months = 12
             site = "NLX1"
-            unlimited_machine = "PBA99"
+            unlimited_machine = ["PBA99"]
 
             for col in df.columns:
                 if isinstance(col, datetime):
@@ -107,9 +110,9 @@ class DataLoader:
                 elif param == "Site" and value:
                     site = str(value)
                 elif param == "MachineUnlimitedCapacity" and value:
-                    unlimited_machine = str(value)
+                    unlimited_machine = [m.strip() for m in str(value).split(',') if m.strip()]
                 elif param == "PurchasedAndProducedMaterials" and value:
-                    for entry in str(value).split(';'):
+                    for entry in str(value).split(','):
                         parts = entry.strip().split(':')
                         if len(parts) == 2:
                             self.purchased_and_produced[parts[0].strip()] = float(parts[1].strip())
@@ -188,6 +191,9 @@ class DataLoader:
             component = str(row.get('Component', '')).strip()
             if not parent or not component or parent == 'nan' or component == 'nan':
                 continue
+            plant = str(row.get('Plant', '')).strip()
+            if self.config and self.config.site and plant and plant != self.config.site:
+                continue
             qty = row.get('BILLOFMATERIALITEMQUANTITY', 0)
             if pd.isna(qty) or qty == 0:
                 continue
@@ -228,7 +234,7 @@ class DataLoader:
                 oee = oee / 100
             mg = str(row.get('Machine group', '')) if pd.notna(row.get('Machine group')) else None
             ss = ShiftSystem.THREE_SHIFT
-            if mc == self.config.unlimited_capacity_machine:
+            if mc in self.config.unlimited_capacity_machine:
                 ss = ShiftSystem.UNLIMITED
             mid = str(row.get('MachineID', mc))
             self.machines[mc] = Machine(
@@ -250,6 +256,9 @@ class DataLoader:
                 continue
             wc = str(row.get('Work Center', '')).strip()
             if not wc:
+                continue
+            plant = str(row.get('Plant', '')).strip()
+            if self.config and self.config.site and plant and plant != self.config.site:
                 continue
             ri = RoutingItem(
                 plant=str(row.get('Plant', '')), material=mat,
@@ -350,9 +359,61 @@ class DataLoader:
                     lt_val = 1
                 self.purchase_lead_times[mn] = lt_val
                 self.purchase_sheet_materials.add(mn)
+                moq = df.iloc[i, 7]
+                try:
+                    moq_val = float(moq) if pd.notna(moq) and float(moq) > 0 else 1.0
+                except (ValueError, TypeError):
+                    moq_val = 1.0
+                self.purchase_moq[mn] = moq_val
             print(f"  Purchase sheet: {len(self.purchase_lead_times)} lead times")
         except Exception as e:
             print(f"  Purchase sheet warning: {e}")
+
+    def get_purchase_moq(self, mat_num: str) -> float:
+        return self.purchase_moq.get(mat_num, 1.0)
+
+    def _load_purchase_actuals(self):
+        """Load actual PO quantities from Purchase sheet date columns (col 8+, row 1 headers)."""
+        try:
+            df = pd.read_excel(self.excel_file, sheet_name='Purchase sheet', header=None)
+            if len(df) < 2:
+                return
+            # Identify date columns in row 1 (index 1), starting from col 8
+            period_cols: List[tuple] = []  # (col_index, period_str)
+            for col_idx in range(8, df.shape[1]):
+                cell = df.iloc[1, col_idx]
+                if pd.isna(cell):
+                    continue
+                try:
+                    if isinstance(cell, datetime):
+                        dt = cell
+                    else:
+                        dt = pd.to_datetime(cell)
+                    ps = dt.strftime('%Y-%m')
+                    if ps in self.periods:
+                        period_cols.append((col_idx, ps))
+                except Exception:
+                    continue
+            if not period_cols:
+                return
+            # Read data rows (row 2+ = index 2+)
+            for i in range(2, len(df)):
+                mn = str(df.iloc[i, 0]).strip()
+                if not mn or mn == 'nan':
+                    continue
+                actuals: Dict[str, float] = {}
+                for col_idx, ps in period_cols:
+                    cell = df.iloc[i, col_idx]
+                    try:
+                        qty = float(cell) if pd.notna(cell) else 0.0
+                    except (ValueError, TypeError):
+                        qty = 0.0
+                    actuals[ps] = qty
+                if actuals:
+                    self.purchase_actuals[mn] = actuals
+            print(f"  Purchase actuals: {len(self.purchase_actuals)} materials, {len(period_cols)} periods")
+        except Exception as e:
+            print(f"  Purchase actuals warning: {e}")
 
     def _calculate_bom_levels(self):
         parent_to_children = defaultdict(set)

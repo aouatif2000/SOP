@@ -17,8 +17,18 @@ app = Flask(__name__,
             template_folder=str(Path(__file__).parent / 'templates'),
             static_folder=str(Path(__file__).parent / 'static'))
 
-current_file_path = None
-current_engine = None
+import uuid as _uuid
+
+sessions: dict = {}           # session_id -> session dict
+active_session_id: str = None  # currently selected session
+
+
+def _get_active():
+    """Return (session_dict, engine) for the active session, or (None, None)."""
+    sess = sessions.get(active_session_id)
+    if not sess:
+        return None, None
+    return sess, sess.get('engine')
 
 
 @app.route('/')
@@ -28,37 +38,58 @@ def index():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    global current_file_path, current_engine
-    
+    global sessions, active_session_id
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
-    
+
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
-    
+
     upload_dir = Path(__file__).parent.parent / 'uploads'
     upload_dir.mkdir(exist_ok=True)
-    
+
     file_path = upload_dir / file.filename
     file.save(str(file_path))
-    current_file_path = str(file_path)
-    current_engine = None
-    
+
     try:
-        # Just load to get metadata - don't calculate yet
+        # Load metadata only — full calculation is triggered by /api/calculate
         from modules.data_loader import DataLoader
-        data = DataLoader(current_file_path)
-        data.load_all()
-        
+        loader = DataLoader(str(file_path))
+        loader.load_all()
+
+        site = getattr(loader.config, 'site', '') or ''
+        planning_month = getattr(loader.config, 'planning_month', '') or ''
+
+        session_id = str(_uuid.uuid4())
+        sessions[session_id] = {
+            'id': session_id,
+            'file_path': str(file_path),
+            'filename': file.filename,
+            'engine': None,
+            'value_results': {},
+            'metadata': {
+                'materials': len(loader.materials),
+                'bom_items': len(loader.bom),
+                'machines': len(loader.machines),
+                'periods': len(loader.periods),
+                'site': site,
+                'planning_month': str(planning_month),
+            },
+            'uploaded_at': datetime.now().isoformat(),
+        }
+        active_session_id = session_id
+
         return jsonify({
             'success': True,
+            'session_id': session_id,
             'filename': file.filename,
             'summary': {
-                'materials': len(data.materials),
-                'bom_items': len(data.bom),
-                'machines': len(data.machines),
-                'periods': len(data.periods),
+                'materials': len(loader.materials),
+                'bom_items': len(loader.bom),
+                'machines': len(loader.machines),
+                'periods': len(loader.periods),
             }
         })
     except Exception as e:
@@ -68,38 +99,39 @@ def upload_file():
 
 @app.route('/api/calculate', methods=['POST'])
 def run_calculations():
-    global current_file_path, current_engine
-    
-    if current_file_path is None:
+    global sessions
+    sess, _ = _get_active()
+    if sess is None:
         return jsonify({'error': 'No file uploaded'}), 400
-    
+
     try:
         # Get user input parameters from request (handle both JSON and form data)
         if request.is_json:
-            data = request.get_json() or {}
+            req_data = request.get_json() or {}
         else:
-            data = request.form.to_dict() or {}
-        
-        planning_month = data.get('planning_month', None)
-        months_actuals = int(data.get('months_actuals', 0) or 0)
-        months_forecast = int(data.get('months_forecast', 12) or 12)
-        
+            req_data = request.form.to_dict() or {}
+
+        planning_month = req_data.get('planning_month', None)
+        months_actuals = int(req_data.get('months_actuals', 0) or 0)
+        months_forecast = int(req_data.get('months_forecast', 12) or 12)
+
         print(f"\nUser Input Parameters:")
         print(f"  Planning Month: {planning_month}")
         print(f"  Months of Actuals: {months_actuals}")
         print(f"  Months of Forecast: {months_forecast}")
-        
-        current_engine = PlanningEngine(
-            current_file_path,
+
+        engine = PlanningEngine(
+            sess['file_path'],
             planning_month=planning_month,
             months_actuals=months_actuals,
             months_forecast=months_forecast
         )
-        current_engine.run()
-        
+        engine.run()
+        sess['engine'] = engine
+
         return jsonify({
             'success': True,
-            'summary': current_engine.get_summary(),
+            'summary': engine.get_summary(),
             'parameters': {
                 'planning_month': planning_month,
                 'months_actuals': months_actuals,
@@ -113,15 +145,14 @@ def run_calculations():
 
 @app.route('/api/results')
 def get_results():
-    global current_engine
-    
+    _, current_engine = _get_active()
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
-    
+
     results = {}
     for lt, rows in current_engine.results.items():
         results[lt] = [row.to_dict() for row in rows]
-    
+
     return jsonify({
         'periods': current_engine.data.periods,
         'results': results
@@ -131,11 +162,10 @@ def get_results():
 @app.route('/api/value_results')
 def get_value_results():
     """Return value planning results (financial)."""
-    global current_engine
-    
+    _, current_engine = _get_active()
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
-    
+
     if not current_engine.value_results:
         return jsonify({'error': 'No value planning results available'}), 400
     
@@ -156,10 +186,92 @@ def get_value_results():
     })
 
 
+@app.route('/api/dashboard')
+def get_dashboard():
+    """Aggregated dashboard endpoint — single call returns all KPIs + chart data."""
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    from modules.models import LineType
+
+    periods = current_engine.data.periods
+
+    # ── KPI: materials count ────────────────────────────────────────────────
+    materials_count = len(current_engine.data.materials)
+
+    # ── KPI: avg utilization from Line 10 ──────────────────────────────────
+    util_rows = current_engine.results.get(LineType.UTILIZATION_RATE.value, [])
+    all_util_vals = [v * 100 for row in util_rows for v in row.values.values() if v is not None]
+    avg_utilization = round(sum(all_util_vals) / len(all_util_vals), 1) if all_util_vals else 0.0
+
+    # ── KPI: total FTE from Line 12, sum across all groups for latest period ─
+    fte_rows = current_engine.results.get(LineType.FTE_REQUIREMENTS.value, [])
+    latest_period = periods[-1] if periods else None
+    total_fte = round(
+        sum(row.values.get(latest_period, 0.0) for row in fte_rows), 2
+    ) if latest_period else 0.0
+
+    # ── utilization_by_machine (Line 10 rows, values as %) ─────────────────
+    utilization_by_machine = []
+    for row in util_rows:
+        utilization_by_machine.append({
+            'machine': row.material_name,
+            'group': row.aux_column or '',
+            'values': {p: round(v * 100, 1) for p, v in row.values.items()},
+        })
+
+    # ── fte_by_group (Line 12 rows) ─────────────────────────────────────────
+    fte_by_group = []
+    for row in fte_rows:
+        fte_by_group.append({
+            'group': row.material_name,
+            'values': {p: round(v, 2) for p, v in row.values.items()},
+        })
+
+    # ── financials from consolidation rows ──────────────────────────────────
+    financials = {}
+    for row in current_engine.value_results.get(LineType.CONSOLIDATION.value, []):
+        key = row.material_number.replace('ZZZZZZ_', '')
+        financials[key] = {p: round(v, 0) for p, v in row.values.items()}
+
+    # ── inventory quality (graceful degradation if fix #10 not applied) ─────
+    inventory_quality: list = []
+    top_10_overstocks: list = []
+    total_overstock = 0.0
+    try:
+        from modules.inventory_quality_engine import InventoryQualityEngine
+        iq_engine = InventoryQualityEngine(
+            current_engine.data,
+            current_engine.results,
+            current_engine.value_results,
+        )
+        iq_result = iq_engine.calculate()
+        inventory_quality = iq_result.get('per_material', [])
+        top_10_overstocks = iq_result.get('top_10_overstocks', [])
+        total_overstock = iq_result.get('total_overstock', 0.0)
+    except (ImportError, Exception):
+        pass
+
+    return jsonify({
+        'periods': periods,
+        'kpis': {
+            'materials': materials_count,
+            'avg_utilization': avg_utilization,
+            'total_fte': total_fte,
+            'total_overstock': total_overstock,
+        },
+        'utilization_by_machine': utilization_by_machine,
+        'fte_by_group': fte_by_group,
+        'financials': financials,
+        'inventory_quality': inventory_quality,
+        'top_10_overstocks': top_10_overstocks,
+    })
+
+
 @app.route('/api/capacity')
 def get_capacity():
-    global current_engine
-    
+    _, current_engine = _get_active()
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
     
@@ -180,8 +292,7 @@ def get_capacity():
 
 @app.route('/api/inventory')
 def get_inventory():
-    global current_engine
-    
+    _, current_engine = _get_active()
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
     
@@ -228,9 +339,24 @@ def get_inventory():
     })
 
 
+@app.route('/api/inventory_quality')
+def get_inventory_quality():
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    from modules.inventory_quality_engine import InventoryQualityEngine
+    engine = InventoryQualityEngine(
+        current_engine.data,
+        current_engine.results,
+        current_engine.value_results,
+    )
+    return jsonify(engine.calculate())
+
+
 @app.route('/api/export')
 def export():
-    global current_engine
+    _, current_engine = _get_active()
 
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
@@ -342,7 +468,7 @@ def _apply_edit_highlights(path: str, engine):
 
 @app.route('/api/update_volume', methods=['POST'])
 def update_volume():
-    global current_engine
+    _, current_engine = _get_active()
 
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
@@ -485,7 +611,8 @@ def update_volume():
                     child_l03_row.values[p] = fc_val + dep_val
 
         # Steps 6/8/9/10: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
-        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans)
+        l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
@@ -614,7 +741,8 @@ def update_volume():
                     child_l03_row.values[p] = fc_val + dep_val
 
         # Steps 8/12/13: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
-        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans)
+        l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
@@ -646,8 +774,7 @@ def update_volume():
 
 @app.route('/api/edits/export')
 def export_edits():
-    global current_engine
-
+    _, current_engine = _get_active()
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
 
@@ -677,7 +804,7 @@ def export_edits():
 
 @app.route('/api/edits/import', methods=['POST'])
 def import_edits():
-    global current_engine
+    _, current_engine = _get_active()
 
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
@@ -719,6 +846,64 @@ def import_edits():
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+
+# ---- Session management endpoints ----
+
+@app.route('/api/sessions')
+def list_sessions():
+    """Return all sessions grouped by year/month/site."""
+    grouped: dict = {}
+    for sid, sess in sessions.items():
+        meta = sess.get('metadata', {})
+        site = meta.get('site', 'Unknown')
+        pm   = str(meta.get('planning_month', '')) or 'Unknown'
+        year = pm[:4] if len(pm) >= 4 else 'Unknown'
+        month = pm[5:7] if len(pm) >= 7 else 'Unknown'
+        key = f"{year}/{month}/{site}"
+        grouped.setdefault(key, [])
+        grouped[key].append({
+            'id':             sid,
+            'filename':       sess.get('filename', ''),
+            'site':           site,
+            'planning_month': pm,
+            'uploaded_at':    sess.get('uploaded_at', ''),
+            'calculated':     sess.get('engine') is not None,
+            'active':         sid == active_session_id,
+            'metadata':       meta,
+        })
+    return jsonify({'active_session_id': active_session_id, 'groups': grouped})
+
+
+@app.route('/api/sessions/switch', methods=['POST'])
+def switch_session():
+    """Set a different session as active. Returns session metadata."""
+    global active_session_id
+    req = request.get_json() or {}
+    sid = req.get('session_id')
+    if not sid or sid not in sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    active_session_id = sid
+    sess = sessions[sid]
+    return jsonify({
+        'success': True,
+        'active_session_id': sid,
+        'filename': sess.get('filename', ''),
+        'metadata': sess.get('metadata', {}),
+        'calculated': sess.get('engine') is not None,
+    })
+
+
+@app.route('/api/sessions/<session_id>', methods=['DELETE'])
+def delete_session(session_id):
+    """Remove a session. Activates the next available session if deleted was active."""
+    global active_session_id, sessions
+    if session_id not in sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    del sessions[session_id]
+    if active_session_id == session_id:
+        active_session_id = next(iter(sessions), None)
+    return jsonify({'success': True, 'active_session_id': active_session_id})
 
 
 if __name__ == '__main__':

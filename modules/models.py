@@ -171,7 +171,7 @@ class PlanningConfig:
     initial_date: datetime
     forecast_months: int = 12
     site: str = "NLX1"
-    unlimited_capacity_machine: str = "PBA99"
+    unlimited_capacity_machine: List[str] = field(default_factory=lambda: ['PBA99'])
     
     def get_periods(self) -> List[str]:
         periods = []

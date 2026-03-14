@@ -19,11 +19,13 @@ from modules.data_loader import DataLoader
 
 
 class CapacityEngine:
-    def __init__(self, data: DataLoader, production_plan: Dict[str, Dict[str, float]]):
+    def __init__(self, data: DataLoader, production_plan: Dict[str, Dict[str, float]], demand_forecasts: Dict[str, Dict[str, float]] = None):
         self.data = data
         self.periods = data.periods
         self.production_plan = production_plan
+        self.demand_forecasts = demand_forecasts or {}
 
+        self.shift_hours_lookup: Dict[str, float] = data.shift_hours
         self.machine_hours_used: Dict[str, Dict[str, float]] = {}
         self.rows_07_cap: List[PlanningRow] = []
         self.rows_09: List[PlanningRow] = []
@@ -33,9 +35,16 @@ class CapacityEngine:
 
         # All groups from material master (including empty ones)
         self.all_groups: List[str] = []
+        self.mill_groups: set = set()
+        self.packaging_groups: set = set()
         for mn in sorted(self.data.materials.keys()):
             if mn.startswith('ZZ') and not mn.startswith('ZZZZ'):
                 self.all_groups.append(mn)
+                mat = self.data.materials[mn]
+                if str(mat.mill_machine_group or '').strip() == '1':
+                    self.mill_groups.add(mn)
+                elif str(mat.packaging_machine_group or '').strip() == '1':
+                    self.packaging_groups.add(mn)
 
     def calculate(self) -> Dict[str, List[PlanningRow]]:
         self._calculate_capacity_utilization()
@@ -43,6 +52,7 @@ class CapacityEngine:
         self._calculate_available_capacity()
         self._calculate_utilization_rate()
         self._calculate_fte_requirements()
+        self._apply_site_exceptions()
 
         return {
             LineType.CAPACITY_UTILIZATION.value: self.rows_07_cap,
@@ -51,6 +61,93 @@ class CapacityEngine:
             LineType.SHIFT_AVAILABILITY.value: self.rows_11,
             LineType.FTE_REQUIREMENTS.value: self.rows_12,
         }
+
+    def _apply_site_exceptions(self):
+        """VBA Exceptions_GTB(): site-specific overrides for NLI1 only."""
+        if not self.data.config or self.data.config.site != 'NLI1':
+            return
+
+        # ── Exception 1: PML18 capacity utilization ──────────────────────────
+        # Normal: PML18 hours = SUM of all material hours on PML18 / OEE
+        # Exception: PML18 hours = SUM(all except B30,B32,B150) + MAX(B30+B32, B150)
+        # where B30=500000956, B32=500000955, B150=500000969
+        B30, B32, B150 = '500000956', '500000955', '500000969'
+        special_mats = {B30, B32, B150}
+
+        pml18_machine = self.data.machines.get('PML18')
+        if pml18_machine:
+            oee = pml18_machine.oee if pml18_machine.oee > 0 else 1.0
+            # Recompute raw hours: separate special from normal materials
+            new_values = {}
+            for p in self.periods:
+                normal_h = 0.0
+                b30_h = 0.0
+                b32_h = 0.0
+                b150_h = 0.0
+                for mat_num, plan_data in self.production_plan.items():
+                    # Find routing hours for this material on PML18
+                    routings = self.data.get_all_routings(mat_num)
+                    for routing in routings:
+                        if routing.work_center != 'PML18':
+                            continue
+                        base_qty = routing.base_quantity if routing.base_quantity > 0 else 1.0
+                        std_time = routing.standard_time if routing.standard_time > 0 else 1.0
+                        aux2_val = base_qty / std_time
+                        prod_qty = plan_data.get(p, 0.0)
+                        h = prod_qty / aux2_val if aux2_val > 0 and prod_qty > 0 else 0.0
+                        if mat_num == B30:
+                            b30_h += h
+                        elif mat_num == B32:
+                            b32_h += h
+                        elif mat_num == B150:
+                            b150_h += h
+                        else:
+                            normal_h += h
+                raw_h = normal_h + max(b30_h + b32_h, b150_h)
+                new_values[p] = raw_h / oee if oee > 0 and raw_h > 0 else raw_h
+
+            # Update the already-emitted PML18 machine-level row in rows_07_cap
+            mid = pml18_machine.machine_id
+            for row in self.rows_07_cap:
+                if row.material_number == mid and row.material_name == 'PML18':
+                    row.values = new_values
+                    # Also update oee_adjusted for group aggregation consistency
+                    self.machine_hours_oee_adjusted['PML18'] = new_values
+                    break
+
+        # ── Exception 2: B15 production plan ─────────────────────────────────
+        # B15 (600004811) need is reduced by B4010 (600004831) production.
+        # This affects the inventory engine output (Lines 03/04/06), not capacity rows.
+        # NOTE: This exception is applied at the InventoryEngine level when planning_engine
+        # processes NLI1. CapacityEngine reflects the corrected production_plan it receives
+        # automatically — no additional action needed here.
+        pass
+
+    def _get_shift_hours_for_machine(self, machine_code: str) -> float:
+        """Return monthly shift hours for a machine, driven by FTE sheet values."""
+        _KEY = {
+            ShiftSystem.TWO_SHIFT: '2-shift system',
+            ShiftSystem.THREE_SHIFT: '3-shift system',
+            ShiftSystem.CONTINUOUS: '24/7 production',
+        }
+        machine = self.data.machines.get(machine_code)
+        if not machine or machine.shift_system == ShiftSystem.UNLIMITED:
+            return self.shift_hours_lookup.get('2-shift system', 347.0)
+        key = _KEY.get(machine.shift_system, '2-shift system')
+        return self.shift_hours_lookup.get(key, 520.0)
+
+    def _get_shift_system_name(self, machine_code: str) -> str:
+        """Return the shift-system label for a machine (for aux_column display)."""
+        _KEY = {
+            ShiftSystem.TWO_SHIFT: '2-shift system',
+            ShiftSystem.THREE_SHIFT: '3-shift system',
+            ShiftSystem.CONTINUOUS: '24/7 production',
+            ShiftSystem.UNLIMITED: 'Unlimited',
+        }
+        machine = self.data.machines.get(machine_code)
+        if not machine:
+            return '2-shift system'
+        return _KEY.get(machine.shift_system, '2-shift system')
 
     def _calculate_capacity_utilization(self):
         """Line 07: Capacity Utilization.
@@ -143,15 +240,74 @@ class CapacityEngine:
                 for p in self.periods
             }
 
-        group_hours = defaultdict(lambda: {p: 0.0 for p in self.periods})
+        # 2.5. Grouped production line rows (VBA: ProdLineCapacityUtilization grouped logic)
+        # Materials with grouped_production_line == '1' have a compound production_line like
+        # 'PML01-PML02-PML03'. AVERAGE the OEE-adjusted hours of component machines and emit
+        # a single grouped row. Component machines are excluded from group-level SUM.
+        grouped_machines: set = set()
+        compound_names_seen: set = set()
+        for mat_num, material in self.data.materials.items():
+            if str(material.grouped_production_line or '').strip() == '1' and material.production_line:
+                compound_name = material.production_line.strip()
+                if '-' not in compound_name or compound_name in compound_names_seen:
+                    continue
+                compound_names_seen.add(compound_name)
+                components = [c.strip() for c in compound_name.split('-') if c.strip()]
+                for c in components:
+                    grouped_machines.add(c)
+                # Inherit machine group from the first known component machine
+                group = next(
+                    (self.data.machines[c].machine_group for c in components if c in self.data.machines),
+                    None
+                )
+                # Average OEE-adjusted hours across components per period
+                grouped_values = {}
+                for p in self.periods:
+                    comp_hours = [
+                        self.machine_hours_oee_adjusted[c].get(p, 0.0)
+                        if c in self.machine_hours_oee_adjusted else 0.0
+                        for c in components
+                    ]
+                    grouped_values[p] = sum(comp_hours) / len(comp_hours) if comp_hours else 0.0
+                self.rows_07_cap.append(PlanningRow(
+                    material_number=compound_name,
+                    material_name=compound_name,
+                    product_type='Machine', product_family=group or '',
+                    spc_product='', product_cluster='', product_name=compound_name,
+                    line_type=LineType.CAPACITY_UTILIZATION.value,
+                    aux_column=group if group else None,
+                    aux_2_column=None,
+                    values=grouped_values
+                ))
+
+        # Track per-machine OEE-adjusted hours per group for MAX/SUM aggregation
+        # group_machine_hours[grp][mc_code][period] = oee_adjusted_hours
+        group_machine_hours: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(dict)
         for mc_code, machine in self.data.machines.items():
             grp = machine.machine_group
-            if grp:
-                for p in self.periods:
-                    group_hours[grp][p] += self.machine_hours_oee_adjusted[mc_code].get(p, 0.0)
+            # Skip component machines that belong to a grouped production line —
+            # their contribution is already captured by the averaged grouped row.
+            if grp and mc_code not in grouped_machines:
+                group_machine_hours[grp][mc_code] = self.machine_hours_oee_adjusted[mc_code]
+
+        # Store aggregated group hours for reuse in _calculate_fte_requirements
+        self.group_hours_aggregated: Dict[str, Dict[str, float]] = {}
 
         for grp_id in self.all_groups:
-            hours = group_hours.get(grp_id, {p: 0.0 for p in self.periods})
+            machines_in_grp = group_machine_hours.get(grp_id, {})
+            if grp_id in self.mill_groups:
+                # VBA MillGroupFormulas: MAXIFS — use the highest machine value per period
+                hours = {
+                    p: max((m.get(p, 0.0) for m in machines_in_grp.values()), default=0.0)
+                    for p in self.periods
+                }
+            else:
+                # VBA PackGroupFormulas / default: SUMIFS — sum all machines per period
+                hours = {p: 0.0 for p in self.periods}
+                for mc_vals in machines_in_grp.values():
+                    for p in self.periods:
+                        hours[p] += mc_vals.get(p, 0.0)
+            self.group_hours_aggregated[grp_id] = hours
             self.rows_07_cap.append(PlanningRow(
                 material_number=grp_id,
                 material_name='', product_type='Machine Group',
@@ -170,7 +326,7 @@ class CapacityEngine:
 
     def _calculate_truck_cap_util(self):
         truck_hours = {}
-        for mat_num, plan_data in self.production_plan.items():
+        for mat_num, plan_data in self.demand_forecasts.items():
             material = self.data.materials.get(mat_num)
             if not material:
                 continue
@@ -209,7 +365,7 @@ class CapacityEngine:
     def _calculate_control_room_cap_util(self):
         cr_mat = self.data.materials.get('ZZZZZ_CONTROLROOM')
         if cr_mat:
-            shift_hours = 520.0
+            shift_hours = self.shift_hours_lookup.get('3-shift system', 520.0)
             self.rows_07_cap.append(PlanningRow(
                 material_number='ZZZZZ_CONTROLROOM',
                 material_name='Control room operators',
@@ -224,23 +380,29 @@ class CapacityEngine:
     def _calculate_shift_availability(self):
         """Line 11: Shift Availability per machine group."""
         print("  [11] Calculating Shift Availability...")
-        shift_hours = 520.0
         for group_id in self.all_groups:
             group = self.data.machine_groups.get(group_id)
             machine_names = []
+            # Determine shift hours from the first non-unlimited machine in the group
+            grp_shift_hours = self.shift_hours_lookup.get('2-shift system', 520.0)
+            grp_shift_name = '2-shift system'
             if group:
                 for mc in group.machine_codes:
                     m = self.data.machines.get(mc)
                     if m:
                         machine_names.append(m.machine_code)
+                        if m.shift_system != ShiftSystem.UNLIMITED:
+                            grp_shift_hours = self._get_shift_hours_for_machine(mc)
+                            grp_shift_name = self._get_shift_system_name(mc)
+                            break
             self.rows_11.append(PlanningRow(
                 material_number=group_id,
                 material_name=';'.join(machine_names) if machine_names else '',
                 product_type='Machine Group', product_family='',
                 spc_product='', product_cluster='', product_name='',
                 line_type=LineType.SHIFT_AVAILABILITY.value,
-                aux_column='3-shift system',
-                values={p: shift_hours for p in self.periods}
+                aux_column=grp_shift_name,
+                values={p: grp_shift_hours for p in self.periods}
             ))
         print(f"       -> {len(self.rows_11)} shift availability rows")
 
@@ -258,7 +420,8 @@ class CapacityEngine:
             else:
                 for period in self.periods:
                     avail_data[period] = machine.get_availability(period)
-                aux_col = '520'
+                shift_h = self._get_shift_hours_for_machine(machine_code)
+                aux_col = str(int(shift_h)) if shift_h == int(shift_h) else str(round(shift_h, 1))
             vals = list(avail_data.values())
             avg_avail = sum(vals) / len(vals) if vals else 1.0
             self.rows_09.append(PlanningRow(
@@ -279,17 +442,17 @@ class CapacityEngine:
         NO OEE in denominator!
         """
         print("  [10] Calculating Utilization Rate...")
-        base_shift_hours = 520.0
         for machine_code, machine in self.data.machines.items():
             rate_data = {}
             used = self.machine_hours_oee_adjusted.get(machine_code, {})
+            machine_shift_hours = self._get_shift_hours_for_machine(machine_code)
             for period in self.periods:
                 if machine.shift_system == ShiftSystem.UNLIMITED:
                     rate_data[period] = 1.0
                 else:
                     avail_factor = machine.get_availability(period)
                     # VBA: cap_util / (shift_hours * availability) - NO OEE!
-                    available = base_shift_hours * avail_factor
+                    available = machine_shift_hours * avail_factor
                     used_hours = used.get(period, 0.0)
                     rate_data[period] = used_hours / available if available > 0 else 0.0
             vals = list(rate_data.values())
@@ -306,18 +469,15 @@ class CapacityEngine:
         print(f"       -> {len(self.rows_10)} utilization rate rows")
 
     def _calculate_fte_requirements(self):
-        """Line 12: FTE Requirements per group + trucks + control room."""
+        """Line 12: FTE Requirements per group + trucks + control room.
+        Mill groups: FTE based on MAX-aggregated cap util (VBA MillGroupFormulas L12).
+        Packaging/default groups: FTE based on SUM-aggregated cap util (VBA PackGroupFormulas L12).
+        """
         print("  [12] Calculating FTE Requirements...")
         fte_per_month = self.data.fte_hours_per_year / 12
-        group_hours = defaultdict(lambda: {p: 0.0 for p in self.periods})
-        for mc_code, machine in self.data.machines.items():
-            grp = machine.machine_group
-            if grp:
-                for p in self.periods:
-                    group_hours[grp][p] += self.machine_hours_used.get(mc_code, {}).get(p, 0.0)
 
         for group_id in self.all_groups:
-            hours = group_hours.get(group_id, {p: 0.0 for p in self.periods})
+            hours = self.group_hours_aggregated.get(group_id, {p: 0.0 for p in self.periods})
             group = self.data.machine_groups.get(group_id)
             machine_names = []
             if group:
@@ -341,7 +501,7 @@ class CapacityEngine:
 
     def _calculate_truck_fte(self, fte_per_month):
         truck_hours = {}
-        for mat_num, plan_data in self.production_plan.items():
+        for mat_num, plan_data in self.demand_forecasts.items():
             material = self.data.materials.get(mat_num)
             if not material:
                 continue
@@ -375,7 +535,7 @@ class CapacityEngine:
             ))
 
     def _calculate_control_room_fte(self, fte_per_month):
-        shift_hours = 520.0
+        shift_hours = self.shift_hours_lookup.get('3-shift system', 520.0)
         fte_val = shift_hours / fte_per_month if fte_per_month > 0 else 0
         self.rows_12.append(PlanningRow(
             material_number='ZZZZZ_CONTROLROOM',

@@ -239,7 +239,10 @@ class PlanningEngine:
 
         # ===== STEP 5: Capacity calculations =====
         print("\n[STEP 5] Calculating capacity...")
-        capacity_engine = CapacityEngine(self.data, self.all_production_plans)
+        # Truck hours use '01. Demand forecast' volumes (VBA TruckOperationsFormulas SUMIFS)
+        l01_rows = self.results.get('01. Demand forecast', [])
+        l01_forecasts = {r.material_number: r.values for r in l01_rows}
+        capacity_engine = CapacityEngine(self.data, self.all_production_plans, l01_forecasts)
         capacity_results = capacity_engine.calculate()
         for line_type, rows in capacity_results.items():
             self.results[line_type] = rows
@@ -342,12 +345,12 @@ class PlanningEngine:
         print(f"\nResults exported to: {output_path}")
     
     def to_excel_with_values(self, output_path: str):
-        """Export both volume planning and value planning to Excel."""
+        """Export both volume planning and value planning to Excel with VBA-matching formatting."""
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             # Volume planning sheet
             df_volumes = self.to_dataframe()
             df_volumes.to_excel(writer, sheet_name='Planning sheet', index=False)
-            
+
             # Value planning sheet
             value_rows = []
             for line_type, rows in self.value_results.items():
@@ -368,13 +371,227 @@ class PlanningEngine:
                     for period, value in row.values.items():
                         row_dict[period] = value
                     value_rows.append(row_dict)
-            
+
             df_values = pd.DataFrame(value_rows)
             df_values.to_excel(writer, sheet_name='Values_Planning sheet', index=False)
-        
+
+            # FTE requirements sheet (Line 12 rows)
+            from modules.models import LineType
+            fte_line = LineType.FTE_REQUIREMENTS.value
+            fte_rows_data = self.results.get(fte_line, [])
+            fte_records = []
+            for row in fte_rows_data:
+                rec = {
+                    'Material number': row.material_number,
+                    'Group name': row.material_name,
+                    'FTE needed': row.aux_column,
+                }
+                for period, val in row.values.items():
+                    rec[period] = round(val, 2)
+                fte_records.append(rec)
+
+            if fte_records:
+                df_fte = pd.DataFrame(fte_records)
+                period_cols = [c for c in df_fte.columns if str(c).count('-') == 1 and len(str(c)) == 7]
+
+                # Add Average column
+                if period_cols:
+                    df_fte['Average'] = df_fte[period_cols].mean(axis=1).round(2)
+
+                # Add TOTAL row
+                total_rec = {'Material number': 'TOTAL', 'Group name': 'TOTAL', 'FTE needed': ''}
+                for p in period_cols:
+                    total_rec[p] = round(df_fte[p].sum(), 2)
+                if period_cols:
+                    total_rec['Average'] = round(df_fte['Average'].sum(), 2)
+                df_fte = pd.concat([df_fte, pd.DataFrame([total_rec])], ignore_index=True)
+
+                df_fte.to_excel(writer, sheet_name='FTE requirements', index=False)
+
+                # Format FTE sheet
+                ws_fte = writer.book['FTE requirements']
+                self._apply_fte_formatting(ws_fte, period_cols)
+
+            # Apply VBA-matching formatting to both sheets
+            wb = writer.book
+            self._apply_excel_formatting(wb['Planning sheet'])
+            if not df_values.empty:
+                self._apply_excel_formatting(wb['Values_Planning sheet'])
+
         print(f"\nResults exported to: {output_path}")
         print(f"  - Planning sheet (volumes)")
         print(f"  - Values_Planning sheet (financial)")
+        if fte_records:
+            print(f"  - FTE requirements ({len(fte_records)} groups)")
+
+    def _apply_excel_formatting(self, ws):
+        """Apply VBA-matching cell formatting to a planning worksheet.
+
+        Rules applied:
+        • #,##0 number format on period data columns
+        • 0.0% format on Line 10 (Utilization rate) data cells
+        • Light-blue fill (DAEEF3) on Line 04 (Inventory) rows
+        • Red fill (FFC7CE) on Line 04 cells < 0 and Line 10 cells > 100%
+        • Orange fill (FFC896) on Line 10 cells < 30%
+        • Purple fill (C9B3FF) on Line 09 (Available capacity) cells < 100 h
+        • Bold font on Line 03 (Total demand) rows
+        • Dotted top border between material-group boundaries
+        """
+        from openpyxl.styles import PatternFill, Font, Border, Side
+        import re
+
+        blue_fill   = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
+        red_fill    = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+        orange_fill = PatternFill(start_color='FFC896', end_color='FFC896', fill_type='solid')
+        purple_fill = PatternFill(start_color='C9B3FF', end_color='C9B3FF', fill_type='solid')
+        bold_font   = Font(bold=True)
+        dotted      = Side(border_style='dotted', color='000000')
+
+        total_cols = ws.max_column
+        period_re  = re.compile(r'^\d{4}-\d{2}$')
+
+        # Locate key columns by reading the header row
+        line_type_col = mat_num_col = data_col_start = None
+        for cell in ws[1]:
+            hdr = str(cell.value or '')
+            if hdr == 'Line type':
+                line_type_col = cell.column
+            elif hdr == 'Material number':
+                mat_num_col = cell.column
+            elif period_re.match(hdr) and data_col_start is None:
+                data_col_start = cell.column
+
+        if line_type_col is None:
+            return
+        if data_col_start is None:
+            data_col_start = total_cols + 1  # no period columns found
+
+        prev_mat = None
+        for excel_row in range(2, ws.max_row + 1):
+            lt  = ws.cell(row=excel_row, column=line_type_col).value
+            mat = ws.cell(row=excel_row, column=mat_num_col).value if mat_num_col else None
+
+            is_l03 = lt == '03. Total demand'
+            is_l04 = lt == '04. Inventory'
+            is_l09 = lt == '09. Available capacity'
+            is_l10 = lt == '10. Utilization rate'
+
+            # Dotted top border at material-group boundaries
+            if mat is not None and mat != prev_mat and excel_row > 2:
+                for col in range(1, total_cols + 1):
+                    c = ws.cell(row=excel_row, column=col)
+                    b = c.border
+                    c.border = Border(top=dotted, bottom=b.bottom,
+                                      left=b.left, right=b.right)
+            prev_mat = mat
+
+            for col in range(1, total_cols + 1):
+                cell = ws.cell(row=excel_row, column=col)
+                is_data = col >= data_col_start
+
+                # Bold for Total demand rows (all columns)
+                if is_l03:
+                    cell.font = bold_font
+
+                if not is_data:
+                    continue
+
+                val     = cell.value
+                num_val = val if isinstance(val, (int, float)) else None
+
+                # Number format
+                if is_l10:
+                    cell.number_format = '0.0%'
+                else:
+                    cell.number_format = '#,##0'
+
+                # Fill: Inventory (Line 04) — blue, overridden by red if negative
+                if is_l04:
+                    if num_val is not None and num_val < 0:
+                        cell.fill = red_fill
+                    else:
+                        cell.fill = blue_fill
+
+                # Fill: Utilization rate (Line 10) — red >100%, orange <30%
+                elif is_l10:
+                    if num_val is not None:
+                        if num_val > 1.0:
+                            cell.fill = red_fill
+                        elif num_val < 0.3:
+                            cell.fill = orange_fill
+
+                # Fill: Available capacity (Line 09) — purple when < 100 h
+                elif is_l09:
+                    if num_val is not None and num_val < 100:
+                        cell.fill = purple_fill
+
+    def _apply_fte_formatting(self, ws, period_cols):
+        """Apply formatting to the FTE requirements sheet."""
+        from openpyxl.styles import PatternFill, Font, Alignment
+
+        # Row-prefix colours
+        blue_fill   = PatternFill(start_color='E3F2FD', end_color='E3F2FD', fill_type='solid')
+        orange_fill = PatternFill(start_color='FFF3E0', end_color='FFF3E0', fill_type='solid')
+        purple_fill = PatternFill(start_color='F3E5F5', end_color='F3E5F5', fill_type='solid')
+        grey_fill   = PatternFill(start_color='EEEEEE', end_color='EEEEEE', fill_type='solid')
+        hdr_fill    = PatternFill(start_color='263238', end_color='263238', fill_type='solid')
+        white_font  = Font(color='FFFFFF', bold=True)
+        bold_font   = Font(bold=True)
+
+        total_cols = ws.max_column
+
+        # Header row
+        for cell in ws[1]:
+            cell.fill = hdr_fill
+            cell.font = white_font
+            cell.alignment = Alignment(horizontal='center')
+
+        # Column widths
+        ws.column_dimensions['A'].width = 20  # Material number
+        ws.column_dimensions['B'].width = 28  # Group name
+        ws.column_dimensions['C'].width = 14  # FTE needed
+        col_letter = 'D'
+        for i, _ in enumerate(period_cols):
+            from openpyxl.utils import get_column_letter
+            ws.column_dimensions[get_column_letter(4 + i)].width = 12
+        # Average column
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(total_cols)].width = 12
+
+        # Data rows
+        for excel_row in range(2, ws.max_row + 1):
+            mat_cell = ws.cell(row=excel_row, column=1)
+            mat_val = str(mat_cell.value or '')
+
+            is_total = mat_val == 'TOTAL'
+
+            # Determine row fill by material_number prefix
+            if is_total:
+                row_fill = grey_fill
+                row_font = bold_font
+            elif mat_val.startswith('ZZZZZ'):
+                row_fill = purple_fill
+                row_font = None
+            elif mat_val.startswith('ZZZZ'):
+                row_fill = orange_fill
+                row_font = None
+            elif mat_val.startswith('ZZ'):
+                row_fill = blue_fill
+                row_font = None
+            else:
+                row_fill = None
+                row_font = None
+
+            for col in range(1, total_cols + 1):
+                cell = ws.cell(row=excel_row, column=col)
+                if row_fill:
+                    cell.fill = row_fill
+                if row_font:
+                    cell.font = row_font
+                # Number format for numeric columns (cols 4+)
+                if col >= 4 and isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.00'
+                    cell.alignment = Alignment(horizontal='right')
 
     def to_json(self) -> Dict:
         return {

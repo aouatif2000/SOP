@@ -84,36 +84,18 @@ class ForecastEngine:
         else:
             aux_1 = 0
 
-        # Aux 2: AVERAGE of values copied from forecast sheet to planning sheet
-        #
-        # VBA DefineVariables sets:
-        #   ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
-        #   ForecastEndClmn = ForecastStartClmn + ForecastMonths - 1
-        # Then DemandForecast copies ForecastMonths values from that range.
-        #
-        # Verified empirically:
-        #   When user_actuals == config_actuals: start_idx = forecast_months + 1
-        #   When user_actuals != config_actuals: start_idx = user_actuals + 1
-        # (0-based index from first data column on forecast sheet)
+        # Aux 2: AVERAGE of ForecastMonths values starting at config_actuals + 1
+        # VBA: ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
+        #      AUX2 = AVERAGE(ForecastStartClmn : ForecastStartClmn + ForecastMonths - 1)
+        config_actuals = self.data.forecast_actuals_months
+        start_idx = config_actuals + 1   # +1 gap column VBA always skips
+        end_idx = start_idx + self.months_forecast
         all_sorted = sorted(forecast_data.items())
-        all_values = [v for p, v in all_sorted]
-
-        if all_values and self.months_forecast > 0 and len(all_values) >= self.months_forecast:
-            config_actuals = self.data.forecast_actuals_months
-
-            if self.months_actuals == config_actuals:
-                start_idx = self.months_forecast + 1
-            else:
-                start_idx = self.months_actuals + 1
-
-            end_idx = start_idx + self.months_forecast
-            start_idx = max(0, start_idx)
-            end_idx = min(len(all_values), end_idx)
-
-            pool = all_values[start_idx:end_idx]
-            aux_2 = round(sum(pool) / len(pool)) if pool else 0
-        else:
-            aux_2 = 0
+        all_values = [v for _, v in all_sorted]
+        start_idx = min(start_idx, len(all_values))
+        end_idx = min(end_idx, len(all_values))
+        pool = all_values[start_idx:end_idx]
+        aux_2 = round(sum(pool) / len(pool)) if pool else 0
 
         return str(aux_1), str(aux_2)
 
