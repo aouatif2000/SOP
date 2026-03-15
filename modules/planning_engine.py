@@ -509,15 +509,64 @@ class PlanningEngine:
             n_consol = len(consol_rows)
             cats = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=1)
 
-            # Helper row for 15% ROCE target (placed just below data)
-            target_row = n_consol + 3
+            # KPI summary table (VBA lines 2868-2940: 13 text box KPIs → formatted cells)
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            _ks = Side(style='thin')
+            _kb = Border(left=_ks, right=_ks, top=_ks, bottom=_ks)
+            _kh_fill = PatternFill(patternType='solid', fgColor='1F3864')   # dark navy header
+            _kd_fill = PatternFill(patternType='solid', fgColor='D9E1F2')   # light blue data rows
+            kpi_header_row = n_consol + 2
+            kpi_items = consol_rows[:13]
+            for _ci, _lbl in [(1, 'KPI'), (2, 'Summary (avg)')]:
+                _c = ws_overview.cell(row=kpi_header_row, column=_ci, value=_lbl)
+                _c.font = Font(bold=True, color='FFFFFF')
+                _c.fill = _kh_fill
+                _c.border = _kb
+                _c.alignment = Alignment(horizontal='center')
+            for _ki, _kitem in enumerate(kpi_items, start=1):
+                _kr = kpi_header_row + _ki
+                _klabel = _kitem.material_number.replace('ZZZZZZ_', '')
+                try:
+                    _kval = float(_kitem.aux_2_column) if _kitem.aux_2_column else 0.0
+                except (ValueError, TypeError):
+                    _kval = 0.0
+                _lc = ws_overview.cell(row=_kr, column=1, value=_klabel)
+                _lc.font = Font(bold=True)
+                _lc.fill = _kd_fill
+                _lc.border = _kb
+                _vc = ws_overview.cell(row=_kr, column=2, value=round(_kval, 4))
+                _vc.fill = _kd_fill
+                _vc.border = _kb
+                _vc.number_format = '#,##0.00'
+                _vc.alignment = Alignment(horizontal='right')
+            ws_overview.column_dimensions['A'].width = 26
+            ws_overview.column_dimensions['B'].width = 18
+            kpi_end_row = kpi_header_row + len(kpi_items)
+
+            # Helper rows — ROCE target 15% and ROCE average constant
+            target_row = kpi_end_row + 2
+            roce_avg_row = kpi_end_row + 3
             ws_overview.cell(row=target_row, column=1, value='Target (15%)')
             for i in range(n_periods):
                 ws_overview.cell(row=target_row, column=3 + i, value=0.15)
+            _roce_consol = next(
+                (r for r in consol_rows if 'ROCE' in r.material_number and 'CAPITAL' not in r.material_number),
+                None
+            )
+            _roce_avg_val = 0.0
+            if _roce_consol:
+                try:
+                    _roce_avg_val = float(_roce_consol.aux_2_column) if _roce_consol.aux_2_column else 0.0
+                except (ValueError, TypeError):
+                    _roce_avg_val = 0.0
+            ws_overview.cell(row=roce_avg_row, column=1, value='ROCE average')
+            for i in range(n_periods):
+                ws_overview.cell(row=roce_avg_row, column=3 + i, value=_roce_avg_val)
 
-            # Placeholder cells for inventory charts (require InventoryQualityEngine)
-            placeholder_row = n_consol + 2
-            ws_overview.cell(row=placeholder_row, column=1, value='Inventory Quality & Top 10 Overstocks: See web dashboard')
+            # Chart anchor base; charts 2 and 3 inserted in Phase 2 (after dedicated sheets exist)
+            _chart_base = kpi_end_row + 5
+            _ov_chart2_anchor = 'A' + str(_chart_base + 24)   # Inventory Quality (Phase 2)
+            _ov_chart3_anchor = 'A' + str(_chart_base + 60)   # Top 10 Overstocks (Phase 2)
 
             # Chart 1 — Projected Financial Metrics (VBA step 141)
             chart1 = LineChart()
@@ -534,9 +583,9 @@ class PlanningEngine:
                         chart1.series[-1].title = SeriesLabel(v=metric)
                         break
             chart1.set_categories(cats)
-            ws_overview.add_chart(chart1, 'A' + str(n_consol + 5))
+            ws_overview.add_chart(chart1, 'A' + str(_chart_base))
 
-            # Chart 2 — ROCE Components (VBA step 144)
+            # Chart 4 — ROCE Components (VBA step 144; 4th of 5 charts in sequence)
             chart2 = LineChart()
             chart2.title = 'ROCE Components'
             chart2.width = 20
@@ -551,9 +600,9 @@ class PlanningEngine:
                         chart2.series[-1].title = SeriesLabel(v=metric)
                         break
             chart2.set_categories(cats)
-            ws_overview.add_chart(chart2, 'A' + str(n_consol + 27))
+            ws_overview.add_chart(chart2, 'A' + str(_chart_base + 90))
 
-            # Chart 3 — ROCE bar chart with dashed 15% target line (VBA step 145)
+            # Chart 5 — ROCE bar with dashed 15% target + green average line (VBA step 145)
             chart3 = BarChart()
             chart3.title = 'ROCE'
             chart3.width = 20
@@ -571,8 +620,16 @@ class PlanningEngine:
             line_overlay.series[0].title = SeriesLabel(v='Target 15%')
             line_overlay.series[0].graphicalProperties.line.dashStyle = 'dash'
             line_overlay.series[0].graphicalProperties.line.solidFill = 'FF0000'
+            # Green ROCE average line (VBA lines 3209-3222, RGB(160,208,120)=A0D078, weight 2)
+            avg_ref = Reference(ws_overview, min_col=3, max_col=2 + n_periods, min_row=roce_avg_row)
+            avg_line = LineChart()
+            avg_line.add_data(avg_ref, titles_from_data=False)
+            avg_line.series[0].title = SeriesLabel(v='ROCE average')
+            avg_line.series[0].graphicalProperties.line.solidFill = 'A0D078'
+            avg_line.series[0].graphicalProperties.line.width = 19050  # weight 2 ≈ 1.5pt in EMU
             chart3 += line_overlay
-            ws_overview.add_chart(chart3, 'A' + str(n_consol + 49))
+            chart3 += avg_line
+            ws_overview.add_chart(chart3, 'A' + str(_chart_base + 114))
 
             # ---- Top 10 Overstocks sheet (VBA CreateTop10OverstocksChart line 7116) ----
             top10_count = 0
@@ -591,49 +648,233 @@ class PlanningEngine:
                         num_mats = len(top10_sorted)
                         num_p = len(t10_periods)
 
-                        # Row 1: headers — col A = 'Material', cols B+ = period labels
-                        ws_t10.cell(row=1, column=1, value='Material')
-                        for ci, p in enumerate(t10_periods, start=2):
-                            ws_t10.cell(row=1, column=ci, value=p)
+                        # Row 1: headers — col A = 'Period', cols B+ = material names
+                        ws_t10.cell(row=1, column=1, value='Period')
+                        for mi, item in enumerate(top10_sorted, start=2):
+                            ws_t10.cell(row=1, column=mi, value=item.get('material_name') or item['material_number'])
 
-                        # Rows 2-11: one row per material
-                        for ri, item in enumerate(top10_sorted, start=2):
-                            ws_t10.cell(row=ri, column=1, value=item.get('material_name') or item['material_number'])
-                            for ci, p in enumerate(t10_periods, start=2):
+                        # Rows 2+: one row per period
+                        for ri, p in enumerate(t10_periods, start=2):
+                            ws_t10.cell(row=ri, column=1, value=p)
+                            for mi, item in enumerate(top10_sorted, start=2):
                                 pdata = item.get('periods', {}).get(p, {})
                                 val = pdata.get('overstock', 0) if isinstance(pdata, dict) else 0
-                                ws_t10.cell(row=ri, column=ci, value=round(val, 0))
-                                ws_t10.cell(row=ri, column=ci).number_format = '#,##0'
+                                ws_t10.cell(row=ri, column=mi, value=round(val, 0))
+                                ws_t10.cell(row=ri, column=mi).number_format = '#,##0'
 
-                        # Column widths
-                        ws_t10.column_dimensions['A'].width = 28
-                        for ci in range(2, num_p + 2):
+                        # Column widths: col A = period labels, cols B+ = material names
+                        ws_t10.column_dimensions['A'].width = 12
+                        for mi in range(2, num_mats + 2):
                             from openpyxl.utils import get_column_letter
-                            ws_t10.column_dimensions[get_column_letter(ci)].width = 11
+                            ws_t10.column_dimensions[get_column_letter(mi)].width = 18
 
-                        # Chart: vertical stacked bar, one series per period
+                        # Chart: vertical stacked (xlColumnStacked), X-axis = periods, series = materials
+                        # VBA: CreateTop10OverstocksChart line 7116, legend at bottom (xlLegendPositionBottom)
                         from openpyxl.chart import BarChart, Reference
                         chart_t10 = BarChart()
                         chart_t10.type = 'col'
                         chart_t10.grouping = 'stacked'
                         chart_t10.overlap = 100
                         chart_t10.title = 'Top 10 Overstocks'
-                        chart_t10.y_axis.title = 'Value (EUR)'
-                        chart_t10.x_axis.title = 'Material'
+                        chart_t10.y_axis.title = 'Value (€)'
+                        chart_t10.y_axis.numFmt = '€#,##0'
                         chart_t10.width = 25
                         chart_t10.height = 15
+                        chart_t10.legend.position = 'b'
 
-                        max_row = 1 + num_mats
-                        for col_idx in range(2, num_p + 2):
+                        max_row = 1 + num_p
+                        for col_idx in range(2, num_mats + 2):
                             data_ref = Reference(ws_t10, min_col=col_idx, min_row=1, max_row=max_row)
                             chart_t10.add_data(data_ref, titles_from_data=True)
                         cats_t10 = Reference(ws_t10, min_col=1, min_row=2, max_row=max_row)
                         chart_t10.set_categories(cats_t10)
 
-                        ws_t10.add_chart(chart_t10, 'A14')
+                        ws_t10.add_chart(chart_t10, 'A' + str(max_row + 2))
                         top10_count = num_mats
             except Exception as e:
                 print(f"  Warning: Top 10 overstocks sheet skipped: {e}")
+
+            # ---- Inventory quality chart sheet (VBA CreateInventoryQualityChart line 6925) ----
+            iq_chart_done = False
+            try:
+                # Reuse _iq_instance / iq_data from the Top 10 block above if available
+                _iq2 = inventory_quality_engine
+                if _iq2 is None and _IQEngine is not None:
+                    _iq2 = _IQEngine(self.data, self.results, self.value_results)
+                if _iq2 is not None:
+                    iq_data2 = _iq2.calculate()
+                    period_totals = iq_data2.get('period_totals', {})
+                    iq_periods = iq_data2.get('periods', self.data.periods)
+                    if period_totals and iq_periods:
+                        ws_iq = wb.create_sheet('Inventory quality chart')
+                        ws_iq.sheet_properties.tabColor = '833C0C'
+
+                        # Extract COGS from value_results consolidation
+                        cogs_row = None
+                        for lt, rows in self.value_results.items():
+                            for r in rows:
+                                if 'COST OF GOODS' in str(r.material_number).upper() or \
+                                   'COST OF GOODS' in str(r.material_name).upper():
+                                    cogs_row = r
+                                    break
+                            if cogs_row:
+                                break
+
+                        # Write header row
+                        headers = ['Period', 'Under', 'Safety Stock', 'Strategic Stock',
+                                   'Normal Variation', 'Overstock', 'Actual Stock', 'Cost of Goods']
+                        for ci, h in enumerate(headers, start=1):
+                            ws_iq.cell(row=1, column=ci, value=h)
+
+                        # Write data rows
+                        for ri, p in enumerate(iq_periods, start=2):
+                            pt = period_totals.get(p, {})
+                            cogs_val = 0.0
+                            if cogs_row and p in cogs_row.values:
+                                try:
+                                    cogs_val = float(cogs_row.values[p] or 0)
+                                except (TypeError, ValueError):
+                                    cogs_val = 0.0
+                            row_vals = [
+                                p,
+                                round(pt.get('under', 0), 0),
+                                round(pt.get('safety', 0), 0),
+                                round(pt.get('strategic', 0), 0),
+                                round(pt.get('normal', 0), 0),
+                                round(pt.get('overstock', 0), 0),
+                                round(pt.get('inventory', 0), 0),
+                                round(cogs_val, 0),
+                            ]
+                            for ci, v in enumerate(row_vals, start=1):
+                                cell = ws_iq.cell(row=ri, column=ci, value=v)
+                                if ci > 1:
+                                    cell.number_format = '#,##0'
+
+                        ws_iq.column_dimensions['A'].width = 12
+                        for ci in range(2, 9):
+                            from openpyxl.utils import get_column_letter
+                            ws_iq.column_dimensions[get_column_letter(ci)].width = 16
+
+                        num_iq_p = len(iq_periods)
+                        max_iq_row = 1 + num_iq_p
+
+                        # --- Stacked bar chart (5 bands: Under, Safety, Strategic, Normal, Overstock) ---
+                        from openpyxl.chart import BarChart, LineChart, Reference, Series
+                        from openpyxl.chart.series import SeriesLabel
+                        from openpyxl.drawing.fill import PatternFillProperties
+
+                        BAND_COLS = [
+                            (2, 'C00000'),  # Under
+                            (3, '196B24'),  # Safety Stock
+                            (4, 'BE8C00'),  # Strategic Stock
+                            (5, 'FFC000'),  # Normal Variation
+                            (6, 'FF0000'),  # Overstock
+                        ]
+
+                        bar_iq = BarChart()
+                        bar_iq.type = 'col'
+                        bar_iq.grouping = 'stacked'
+                        bar_iq.overlap = 100
+                        bar_iq.title = 'Inventory quality'
+                        bar_iq.y_axis.title = 'Value (€)'
+                        bar_iq.y_axis.numFmt = '€#,##0'
+                        bar_iq.width = 30
+                        bar_iq.height = 18
+                        bar_iq.legend.position = 'b'
+
+                        for col_idx, hex_color in BAND_COLS:
+                            data_ref = Reference(ws_iq, min_col=col_idx, min_row=1, max_row=max_iq_row)
+                            bar_iq.add_data(data_ref, titles_from_data=True)
+                            s = bar_iq.series[-1]
+                            s.graphicalProperties.solidFill = hex_color
+                            s.graphicalProperties.line.solidFill = hex_color
+
+                        cats_iq = Reference(ws_iq, min_col=1, min_row=2, max_row=max_iq_row)
+                        bar_iq.set_categories(cats_iq)
+
+                        # --- Line chart overlay (Actual Stock + CoGS) ---
+                        line_iq = LineChart()
+                        line_iq.grouping = 'standard'
+
+                        act_ref = Reference(ws_iq, min_col=7, min_row=1, max_row=max_iq_row)
+                        line_iq.add_data(act_ref, titles_from_data=True)
+                        s_act = line_iq.series[-1]
+                        s_act.graphicalProperties.line.solidFill = '800080'
+                        s_act.graphicalProperties.line.width = 19050  # 1.5pt in EMU
+
+                        cog_ref = Reference(ws_iq, min_col=8, min_row=1, max_row=max_iq_row)
+                        line_iq.add_data(cog_ref, titles_from_data=True)
+                        s_cog = line_iq.series[-1]
+                        s_cog.graphicalProperties.line.solidFill = 'ADD8E6'
+                        s_cog.graphicalProperties.line.width = 38100  # 3pt in EMU
+
+                        # Combine: bar + line
+                        bar_iq += line_iq
+                        ws_iq.add_chart(bar_iq, 'A' + str(max_iq_row + 2))
+                        iq_chart_done = True
+            except Exception as e:
+                print(f"  Warning: Inventory quality chart sheet skipped: {e}")
+
+            # ---- High-level overview (Phase 2) — charts 2 & 3 (VBA lines 3049-3091) ----
+            # Source sheets now exist in the workbook; recreate charts referencing their cells.
+            try:
+                _ws_iq_ov = wb['Inventory quality chart'] if 'Inventory quality chart' in wb.sheetnames else None
+                if _ws_iq_ov is not None:
+                    _iq_ov_max = _ws_iq_ov.max_row
+                    from openpyxl.chart import BarChart as _BC2, LineChart as _LC2, Reference as _Ref2
+                    from openpyxl.chart.series import SeriesLabel as _SL2
+                    # Chart 2 — stacked bar + line overlay (same as dedicated sheet)
+                    _ov_iq = _BC2()
+                    _ov_iq.type = 'col'
+                    _ov_iq.grouping = 'stacked'
+                    _ov_iq.overlap = 100
+                    _ov_iq.title = 'Inventory quality'
+                    _ov_iq.y_axis.numFmt = '€#,##0'
+                    _ov_iq.width = 30
+                    _ov_iq.height = 18
+                    _ov_iq.legend.position = 'b'
+                    for _ci, _hx in [(2, 'C00000'), (3, '196B24'), (4, 'BE8C00'), (5, 'FFC000'), (6, 'FF0000')]:
+                        _r2 = _Ref2(_ws_iq_ov, min_col=_ci, min_row=1, max_row=_iq_ov_max)
+                        _ov_iq.add_data(_r2, titles_from_data=True)
+                        _s2 = _ov_iq.series[-1]
+                        _s2.graphicalProperties.solidFill = _hx
+                        _s2.graphicalProperties.line.solidFill = _hx
+                    _ov_iq.set_categories(_Ref2(_ws_iq_ov, min_col=1, min_row=2, max_row=_iq_ov_max))
+                    _ov_iq_line = _LC2()
+                    for _ci, _hx, _lw in [(7, '800080', 19050), (8, 'ADD8E6', 38100)]:
+                        _r2 = _Ref2(_ws_iq_ov, min_col=_ci, min_row=1, max_row=_iq_ov_max)
+                        _ov_iq_line.add_data(_r2, titles_from_data=True)
+                        _sl2 = _ov_iq_line.series[-1]
+                        _sl2.graphicalProperties.line.solidFill = _hx
+                        _sl2.graphicalProperties.line.width = _lw
+                    _ov_iq += _ov_iq_line
+                    ws_overview.add_chart(_ov_iq, _ov_chart2_anchor)
+            except Exception as _e2:
+                print(f"  Warning: Overview inventory quality chart skipped: {_e2}")
+
+            try:
+                _ws_t10_ov = wb['Top 10 overstocks'] if 'Top 10 overstocks' in wb.sheetnames else None
+                if _ws_t10_ov is not None:
+                    _t10_ov_max_r = _ws_t10_ov.max_row
+                    _t10_ov_max_c = _ws_t10_ov.max_column
+                    from openpyxl.chart import BarChart as _BC3, Reference as _Ref3
+                    # Chart 3 — stacked bar, legend=right (VBA xlLegendPositionRight for overview copy)
+                    _ov_t10 = _BC3()
+                    _ov_t10.type = 'col'
+                    _ov_t10.grouping = 'stacked'
+                    _ov_t10.overlap = 100
+                    _ov_t10.title = 'Top 10 Overstocks'
+                    _ov_t10.y_axis.numFmt = '€#,##0'
+                    _ov_t10.width = 25
+                    _ov_t10.height = 15
+                    _ov_t10.legend.position = 'r'
+                    for _ci in range(2, _t10_ov_max_c + 1):
+                        _r3 = _Ref3(_ws_t10_ov, min_col=_ci, min_row=1, max_row=_t10_ov_max_r)
+                        _ov_t10.add_data(_r3, titles_from_data=True)
+                    _ov_t10.set_categories(_Ref3(_ws_t10_ov, min_col=1, min_row=2, max_row=_t10_ov_max_r))
+                    ws_overview.add_chart(_ov_t10, _ov_chart3_anchor)
+            except Exception as _e3:
+                print(f"  Warning: Overview Top 10 chart skipped: {_e3}")
 
         print(f"\nResults exported to: {output_path}")
         print(f"  - Planning sheet (volumes)")
@@ -644,6 +885,8 @@ class PlanningEngine:
             print(f"  - High-level overview ({len(consol_rows)} consolidation rows, 3 charts)")
         if top10_count:
             print(f"  - Top 10 overstocks ({top10_count} materials)")
+        if iq_chart_done:
+            print(f"  - Inventory quality chart")
 
     def _apply_excel_formatting(self, ws):
         """Apply VBA-matching cell formatting to a planning worksheet.
@@ -652,20 +895,22 @@ class PlanningEngine:
         • #,##0 number format on period data columns
         • 0.0% format on Line 10 (Utilization rate) data cells
         • Light-blue fill (DAEEF3) on Line 04 (Inventory) rows
-        • Red fill (FFC7CE) on Line 04 cells < 0 and Line 10 cells > 100%
-        • Orange fill (FFC896) on Line 10 cells < 30%
-        • Purple fill (C9B3FF) on Line 09 (Available capacity) cells < 100 h
+        • Dynamic CF: red (FFC7CE) on L04 < 0, L10 > 100%; orange (FFC896) on L10 < 30%
+        • Dynamic CF: purple (C8A2C8) on L09 < 1 (availability is 0.0-1.0 scale)
+        • L10 rules only applied to production rows where material starts with 'Z_'
         • Bold font on Line 03 (Total demand) rows
         • Dotted top border between material-group boundaries
         """
         from openpyxl.styles import PatternFill, Font, Border, Side
+        from openpyxl.formatting.rule import CellIsRule
         import re
 
         blue_fill   = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
-        red_fill    = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-        orange_fill = PatternFill(start_color='FFC896', end_color='FFC896', fill_type='solid')
-        purple_fill = PatternFill(start_color='C9B3FF', end_color='C9B3FF', fill_type='solid')
         bold_font   = Font(bold=True)
+        # Dynamic CF fills (written as rules, not static fills)
+        cf_red    = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+        cf_orange = PatternFill(start_color='FFC896', end_color='FFC896', fill_type='solid')
+        cf_purple = PatternFill(start_color='C8A2C8', end_color='C8A2C8', fill_type='solid')
         dotted      = Side(border_style='dotted', color='000000')
 
         total_cols = ws.max_column
@@ -687,7 +932,22 @@ class PlanningEngine:
         if data_col_start is None:
             data_col_start = total_cols + 1  # no period columns found
 
+        # Convert period header text strings to Excel date values with mm/yyyy format
+        # (VBA Add_Headers_Planningsheet line 4862: date value + mm/yyyy NumberFormat)
+        from datetime import datetime as _dt
+        for cell in ws[1]:
+            hdr = str(cell.value or '')
+            if period_re.match(hdr):
+                try:
+                    cell.value = _dt.strptime(hdr, '%Y-%m')
+                    cell.number_format = 'mm/yyyy'
+                except ValueError:
+                    pass
+
         prev_mat = None
+        _cf_l04_rows = []
+        _cf_l09_rows = []
+        _cf_l10_rows = []
         for excel_row in range(2, ws.max_row + 1):
             lt  = ws.cell(row=excel_row, column=line_type_col).value
             mat = ws.cell(row=excel_row, column=mat_num_col).value if mat_num_col else None
@@ -705,6 +965,14 @@ class PlanningEngine:
                     c.border = Border(top=dotted, bottom=b.bottom,
                                       left=b.left, right=b.right)
             prev_mat = mat
+
+            # Collect rows for dynamic CF (second pass)
+            if is_l04:
+                _cf_l04_rows.append(excel_row)
+            elif is_l09:
+                _cf_l09_rows.append(excel_row)
+            elif is_l10 and str(mat or '').startswith('Z_'):
+                _cf_l10_rows.append(excel_row)
 
             for col in range(1, total_cols + 1):
                 cell = ws.cell(row=excel_row, column=col)
@@ -726,25 +994,31 @@ class PlanningEngine:
                 else:
                     cell.number_format = '#,##0'
 
-                # Fill: Inventory (Line 04) — blue, overridden by red if negative
+                # Fill: Inventory (Line 04) — static blue fill only
                 if is_l04:
-                    if num_val is not None and num_val < 0:
-                        cell.fill = red_fill
-                    else:
-                        cell.fill = blue_fill
+                    cell.fill = blue_fill
 
-                # Fill: Utilization rate (Line 10) — red >100%, orange <30%
-                elif is_l10:
-                    if num_val is not None:
-                        if num_val > 1.0:
-                            cell.fill = red_fill
-                        elif num_val < 0.3:
-                            cell.fill = orange_fill
+        # Dynamic conditional formatting (VBA ApplyConditionalFormatting line 4144)
+        if data_col_start is not None and data_col_start <= total_cols:
+            from openpyxl.utils import get_column_letter as _gcl
+            start_letter = _gcl(data_col_start)
+            end_letter   = _gcl(total_cols)
 
-                # Fill: Available capacity (Line 09) — purple when < 100 h
-                elif is_l09:
-                    if num_val is not None and num_val < 100:
-                        cell.fill = purple_fill
+            # L10 production rows: red >100%, orange <30% (VBA lines 4189-4198)
+            for _rn in _cf_l10_rows:
+                _rng = f'{start_letter}{_rn}:{end_letter}{_rn}'
+                ws.conditional_formatting.add(_rng, CellIsRule(operator='greaterThan', formula=['1'],   fill=cf_red))
+                ws.conditional_formatting.add(_rng, CellIsRule(operator='lessThan',    formula=['0.3'], fill=cf_orange))
+
+            # L04 rows: red <0 (VBA lines 4208-4213)
+            for _rn in _cf_l04_rows:
+                _rng = f'{start_letter}{_rn}:{end_letter}{_rn}'
+                ws.conditional_formatting.add(_rng, CellIsRule(operator='lessThan', formula=['0'], fill=cf_red))
+
+            # L09 rows: purple <1 — availability stored as 0.0-1.0 (VBA lines 4236-4241)
+            for _rn in _cf_l09_rows:
+                _rng = f'{start_letter}{_rn}:{end_letter}{_rn}'
+                ws.conditional_formatting.add(_rng, CellIsRule(operator='lessThan', formula=['1'], fill=cf_purple))
 
     def _apply_fte_formatting(self, ws, period_cols):
         """Apply formatting to the FTE requirements sheet."""
