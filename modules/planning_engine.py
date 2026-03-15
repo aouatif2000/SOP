@@ -1051,6 +1051,18 @@ class PlanningEngine:
             cell.font = white_font
             cell.alignment = Alignment(horizontal='center')
 
+        # Convert period header strings to Excel date values with mm/yyyy format
+        # (matches _apply_excel_formatting() behaviour on Planning and Values_Planning sheets)
+        from datetime import datetime as _dt
+        for cell in ws[1]:
+            hdr = str(cell.value or '')
+            if len(hdr) == 7 and hdr.count('-') == 1:
+                try:
+                    cell.value = _dt.strptime(hdr, '%Y-%m')
+                    cell.number_format = 'mm/yyyy'
+                except ValueError:
+                    pass
+
         # Column widths
         ws.column_dimensions['A'].width = 20  # Material number
         ws.column_dimensions['B'].width = 28  # Group name
