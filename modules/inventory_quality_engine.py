@@ -106,14 +106,17 @@ class InventoryQualityEngine:
                 }
 
             mat = self.data.materials.get(mat_num)
+            overstock_by_period = {p: periods_data[p]['overstock'] for p in self.periods}
             per_material.append({
                 'material_number': mat_num,
                 'material_name': mat.name if mat else '',
+                'name': mat.name if mat else '',
                 'product_family': mat.product_family if mat else '',
                 'unit_value': round(unit_val, 4),
                 'total_overstock': round(mat_total_overstock, 2),
                 'total_inventory': round(mat_total_inventory, 2),
                 'periods': periods_data,
+                'overstock_by_period': overstock_by_period,
             })
 
         # Global totals per period
