@@ -284,6 +284,17 @@
                     <canvas id="roceChart" height="220"></canvas>
                 </div>
             </div>
+            <!-- Demand Trend + Inventory vs Target Row -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mt-4 lg:mt-6">
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Total Demand Trend</h3>
+                    <canvas id="demandTrendChart" height="220"></canvas>
+                </div>
+                <div class="card rounded-xl p-6">
+                    <h3 class="font-semibold mb-4">Inventory vs Target Stock</h3>
+                    <canvas id="invTargetChart" height="220"></canvas>
+                </div>
+            </div>
             <!-- backward-compat hidden elements -->
             <span id="kpi-bom" class="hidden"></span>
             <span id="kpi-lt" class="hidden"></span>
@@ -670,6 +681,8 @@ async function renderDashboard() {
         renderTop10Overstocks(state.top10Overstocks);
         renderFinancialChart(data.financials || {}, data.periods || []);
         renderRoceChart(data.financials || {}, data.periods || []);
+        renderDemandTrendChart(data.periods || [], data.demand_trend || {});
+        renderInvTargetChart(data.periods || [], data.inventory_trend || {}, data.target_trend || {});
     } catch (err) { log('Dashboard error: ' + err); }
 }
 
@@ -937,6 +950,56 @@ function renderTop10Overstocks(top10) {
                 }
             }
         }
+    });
+}
+
+function renderDemandTrendChart(periods, demandTrend) {
+    const canvas = document.getElementById('demandTrendChart');
+    if (!canvas) return;
+    if (window._demandTrendChart) window._demandTrendChart.destroy();
+    window._demandTrendChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: periods,
+            datasets: [{
+                label: 'Total demand',
+                data: periods.map(p => demandTrend[p] || 0),
+                borderColor: 'rgba(59,130,246,0.9)',
+                backgroundColor: 'rgba(59,130,246,0.15)',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 2,
+            }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: false } } }
+    });
+}
+
+function renderInvTargetChart(periods, inventoryTrend, targetTrend) {
+    const canvas = document.getElementById('invTargetChart');
+    if (!canvas) return;
+    if (window._invTargetChart) window._invTargetChart.destroy();
+    window._invTargetChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: periods,
+            datasets: [
+                {
+                    label: 'Inventory',
+                    data: periods.map(p => inventoryTrend[p] || 0),
+                    borderColor: 'rgba(59,130,246,0.9)',
+                    tension: 0.3, pointRadius: 2,
+                },
+                {
+                    label: 'Target stock',
+                    data: periods.map(p => targetTrend[p] || 0),
+                    borderColor: 'rgba(249,115,22,0.9)',
+                    borderDash: [6, 3],
+                    tension: 0.3, pointRadius: 2,
+                }
+            ]
+        },
+        options: { responsive: true, scales: { y: { beginAtZero: false } } }
     });
 }
 
@@ -1353,11 +1416,27 @@ async function loadEditsJSON(event) {
     } catch (err) { alert('Import error: ' + err); }
 }
 
-function resetAllEdits() {
+async function resetAllEdits() {
     if (!current_engine_loaded()) return;
-    state.cellEdits = {};
-    updateEditBadge();
-    runCalc();
+    if (!confirm('Reset all manual edits? This will restore all values to their original calculated state.')) return;
+    try {
+        const res = await fetch('/api/reset_edits', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            state.results = data.results;
+            state.valueResults = data.value_results;
+            state.cellEdits = {};
+            updateEditBadge();
+            renderPlanningTable(state.results, state.periods);
+            updateTableFromResults(data.results, null);
+            if (data.consolidation) updateConsolidation(data.consolidation);
+            log('All edits reset to original values.');
+        } else {
+            log('Reset failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        log('Reset error: ' + err);
+    }
 }
 
 function current_engine_loaded() {

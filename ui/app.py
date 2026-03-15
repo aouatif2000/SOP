@@ -254,6 +254,22 @@ def get_dashboard():
     except (ImportError, Exception):
         pass
 
+    # Aggregate total demand (Line 03) across all materials per period
+    demand_trend = {}
+    for row in current_engine.results.get('03. Total demand', []):
+        for p in periods:
+            demand_trend[p] = round(demand_trend.get(p, 0.0) + row.values.get(p, 0.0), 1)
+
+    # Aggregate inventory (Line 04) and target stock (Line 05) per period
+    inventory_trend = {}
+    target_trend = {}
+    for row in current_engine.results.get('04. Inventory', []):
+        for p in periods:
+            inventory_trend[p] = round(inventory_trend.get(p, 0.0) + row.values.get(p, 0.0), 1)
+    for row in current_engine.results.get('05. Minimum target stock', []):
+        for p in periods:
+            target_trend[p] = round(target_trend.get(p, 0.0) + row.values.get(p, 0.0), 1)
+
     return jsonify({
         'periods': periods,
         'kpis': {
@@ -267,6 +283,9 @@ def get_dashboard():
         'financials': financials,
         'inventory_quality': inventory_quality,
         'top_10_overstocks': top_10_overstocks,
+        'demand_trend': demand_trend,
+        'inventory_trend': inventory_trend,
+        'target_trend': target_trend,
     })
 
 
@@ -303,7 +322,7 @@ def get_inventory():
     tgt_rows = current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
     
     target_lookup = {r.material_number: r.values for r in tgt_rows}
-    periods = current_engine.data.periods[:6]
+    periods = current_engine.data.periods
     
     data = []
     ok, low, high = 0, 0, 0
@@ -314,7 +333,10 @@ def get_inventory():
         avg_tgt = sum(target.get(p, 0) for p in periods) / len(periods) if target and periods else 0
         
         status = 'OK'
-        if avg_tgt > 0:
+        if avg_inv <= 0:
+            status = 'LOW'
+            low += 1
+        elif avg_tgt > 0:
             if avg_inv < avg_tgt * 0.5:
                 status = 'LOW'
                 low += 1
@@ -914,6 +936,45 @@ def import_edits():
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+
+@app.route('/api/reset_edits', methods=['POST'])
+def reset_edits():
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    from modules.capacity_engine import CapacityEngine
+    from modules.value_planning_engine import ValuePlanningEngine
+
+    # Restore all manually edited rows to their original values
+    for lt, rows in current_engine.results.items():
+        for row in rows:
+            if row.manual_edits:
+                for period, edit_data in row.manual_edits.items():
+                    row.set_value(period, edit_data['original'])
+                row.manual_edits = {}
+
+    # Recalculate capacity and value planning to restore cascade
+    l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
+    cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+    cap_results = cap_eng.calculate()
+    for lt, cap_rows in cap_results.items():
+        current_engine.results[lt] = cap_rows
+
+    current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+    current_engine.value_results = current_engine.value_engine.calculate()
+
+    results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+    value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+    consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+
+    return jsonify({
+        'success': True,
+        'results': results_dict,
+        'value_results': value_results_dict,
+        'consolidation': consolidation,
+    })
 
 
 # ---- Session management endpoints ----
