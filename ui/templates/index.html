@@ -91,7 +91,7 @@
             transition: background 0.15s;
         }
         #sidebarToggle:hover { background: #2563eb; color: #fff; }
-        #main-content { flex: 1; min-width: 0; overflow: hidden; }
+        #main-content { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; }
         .drop-zone {
             border: 2px dashed rgba(59,130,246,0.4); border-radius: 8px;
             padding: 14px 10px; text-align: center; cursor: pointer;
@@ -120,14 +120,19 @@
         /* ===== END SIDEBAR LAYOUT ===== */
         /* ===== RESPONSIVE OVERRIDES ===== */
         @media (max-width: 768px) {
+            #app-layout { flex-direction: column; }
             #sidebar { position: fixed; z-index: 100; height: 100vh; transition: transform 0.3s; }
             #sidebar.collapsed { transform: translateX(-100%); width: 280px; }
             #sidebar-inner { width: 280px; }
             #sidebarToggle { position: fixed; top: 50px; left: 4px; z-index: 101; }
+            #main-content { width: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
             .data-table td, .data-table th { font-size: 11px; padding: 4px 5px; }
             .hm-table td, .hm-table th { font-size: 9px; padding: 2px 4px; }
         }
         @media (max-width: 480px) {
+            header .flex-wrap { gap: 4px; }
+            header label.text-slate-400 { display: none; }
+            header input[type=number] { width: 40px; }
             .data-table td, .data-table th { font-size: 10px; padding: 3px 4px; }
         }
     </style>
@@ -417,17 +422,29 @@ function updateHorizonDisplay() {
     const actuals = Math.max(0, parseInt(document.getElementById('monthsActuals').value) || 0);
     const forecast = Math.max(0, parseInt(document.getElementById('monthsForecast').value) || 0);
     const banner = document.getElementById('horizonBanner');
-    const text = document.getElementById('horizonText');
+    const horizonEl = document.getElementById('horizonText');
     if (!pmVal) { banner.classList.add('hidden'); return; }
     const [yr, mo] = pmVal.split('-').map(Number);
-    const start = new Date(yr, mo - 1, 1);
+
+    // Primary: derive start/end from the actual periods array in the loaded results
+    let startDate, endDate;
+    const periods = state.periods;
+    if (periods && periods.length > 0) {
+        startDate = new Date(periods[0] + '-01');
+        endDate   = new Date(periods[periods.length - 1] + '-01');
+    } else {
+        // Fallback: mathematical derivation from header fields
+        // Start = planning_month minus (actuals-1) → first actuals month
+        const startOffset = actuals > 0 ? (actuals - 1) : 0;
+        startDate = new Date(yr, mo - 1 - startOffset, 1);
+        // End = planning_month plus forecast months → last forecast month
+        endDate = new Date(yr, mo - 1 + forecast, 1);
+    }
+
+    const fmt = d => d.toLocaleString('en-GB', { month: 'short', year: '2-digit' });
     const total = actuals + forecast;
-    const end = new Date(yr, mo - 1 + total - 1, 1);
-    const fmt = d => d.toLocaleString('en', { month: 'short', year: 'numeric' });
-    const parts = [];
-    if (actuals > 0) parts.push(actuals + ' actuals');
-    if (forecast > 0) parts.push(forecast + ' forecast');
-    text.textContent = `Planning from ${fmt(start)} to ${fmt(end)}  —  ${parts.join(', ')}  (${total} months total)`;
+    const actualsText = actuals > 0 ? `${actuals} actuals, ` : '';
+    horizonEl.textContent = `Planning from ${fmt(startDate)} to ${fmt(endDate)} — ${actualsText}${forecast} forecast (${total} months total)`;
     banner.classList.remove('hidden');
 }
 
@@ -1024,6 +1041,12 @@ const PLAN_EDITABLE = new Set(['01. Demand forecast', '06. Production plan']);
 
 function renderPlanningTable(results, periods) {
     if (!results) return;
+    // Derive period columns from Line 01 row values — primary source of truth for column range.
+    // This ensures columns span from first actuals month through last forecast month.
+    const _line01rows = results['01. Demand forecast'] || [];
+    if (_line01rows.length > 0 && _line01rows[0].values && Object.keys(_line01rows[0].values).length > 0) {
+        periods = Object.keys(_line01rows[0].values).sort();
+    }
     // Populate line type filter
     const ltSel = document.getElementById('ltFilter');
     const prevLt = ltSel ? ltSel.value : 'all';
@@ -1052,7 +1075,7 @@ function renderPlanningTable(results, periods) {
         const a2disp = a2flag ? a2raw.slice(0, -1) + ' ⚠' : (a2raw || '-');
         const a2style = a2flag ? ' style="background:rgba(255,199,206,0.25)"' : '';
         const periodCells = periods.map(p => {
-            const key = `${item.line_type}||${item.material_number}||${p}`;
+            const key = `${item.line_type}||${item.material_number}||${item.aux_column||''}||${p}`;
             const manualEdit = item.manual_edits && item.manual_edits[p];
             const val = item.values[p] || 0;
             let cls = 'text-right';
@@ -1088,7 +1111,7 @@ function renderPlanningTable(results, periods) {
     previousValues = {};
     items.forEach(item => {
         periods.forEach(p => {
-            previousValues[`${item.line_type}||${item.material_number}||${p}`] = item.values[p] || 0;
+            previousValues[`${item.line_type}||${item.material_number}||${item.aux_column||''}||${p}`] = item.values[p] || 0;
         });
     });
     if (!_planDelegationSetup) { _setupPlanTableDelegation(); _planDelegationSetup = true; }
@@ -1191,7 +1214,7 @@ function updateTableFromResults(results, valueResults) {
     for (const [lt, rows] of Object.entries(results))
         for (const row of rows)
             for (const [p, v] of Object.entries(row.values || {}))
-                newVals[`${lt}||${row.material_number}||${p}`] = v;
+                newVals[`${lt}||${row.material_number}||${row.aux_column||''}||${p}`] = v;
     // Update cells in-place
     tbody.querySelectorAll('td[data-key]').forEach(cell => {
         const key = cell.dataset.key;
@@ -1215,8 +1238,11 @@ function updateTableFromResults(results, valueResults) {
         // Remove old indicators
         cell.querySelectorAll('.cell-indicator').forEach(s => s.remove());
         // Find manual_edit for this cell from results
-        const [ltKey, matKey, pKey] = key.split('||');
-        const row = results[ltKey] && results[ltKey].find(r => r.material_number === matKey);
+        const parts = key.split('||');
+        const ltKey = parts[0], matKey = parts[1], auxKey = parts[2], pKey = parts[3];
+        const row = results[ltKey] && results[ltKey].find(r =>
+            r.material_number === matKey && (r.aux_column || '') === auxKey
+        );
         const manualEdit = row && row.manual_edits && row.manual_edits[pKey];
         if (manualEdit) {
             const orig = manualEdit.original;
@@ -1255,7 +1281,7 @@ function updateTableFromResults(results, valueResults) {
     for (const [lt2, rows2] of Object.entries(results))
         for (const row2 of rows2)
             for (const [p2, v2] of Object.entries(row2.values || {}))
-                previousValues[`${lt2}||${row2.material_number}||${p2}`] = v2;
+                previousValues[lt2+'||'+row2.material_number+'||'+(row2.aux_column||'')+'||'+p2] = v2;
     if (valueResults) {
         state.valueResults = valueResults;
         loadValuePlanningData(); renderConsolidation(); renderFinChart(); updateValueKPIs();
@@ -1313,7 +1339,7 @@ async function loadEditsJSON(event) {
             for (const row of rows) {
                 if (row.manual_edits && Object.keys(row.manual_edits).length > 0) {
                     for (const [p, editData] of Object.entries(row.manual_edits)) {
-                        const key = `${row.line_type}||${row.material_number}||${p}`;
+                        const key = `${row.line_type}||${row.material_number}||${row.aux_column||''}||${p}`;
                         const orig = editData.original;
                         const nv = editData.new;
                         const dp = orig !== 0 ? parseFloat(((nv - orig) / Math.abs(orig) * 100).toFixed(2)) : 0;

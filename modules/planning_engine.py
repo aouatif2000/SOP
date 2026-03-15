@@ -100,8 +100,18 @@ class PlanningEngine:
         if self.planning_month:
             try:
                 pm = datetime.strptime(self.planning_month, '%Y/%m')
-                self.data.config.initial_date = pm
-                print(f"  >> planning_month override: start={pm.strftime('%Y-%m')}")
+                # Shift the period window start back to the first actuals month.
+                # With months_actuals=12 and planning_month=Dec 2025 → start=Jan 2025.
+                # With months_actuals=0 or 1 → no shift (start remains at planning month).
+                shift = max(0, self.months_actuals - 1)
+                if shift > 0:
+                    total_m = pm.year * 12 + (pm.month - 1) - shift
+                    pm_start = datetime(total_m // 12, total_m % 12 + 1, 1)
+                else:
+                    pm_start = pm
+                self.data.config.initial_date = pm_start
+                print(f"  >> planning_month override: planning_month={pm.strftime('%Y-%m')}, "
+                      f"start={pm_start.strftime('%Y-%m')} (shifted back {shift} months)")
             except ValueError:
                 print(f"  >> WARNING: Could not parse planning_month='{self.planning_month}' "
                       f"(expected YYYY/MM) — using date from Excel Config sheet")
