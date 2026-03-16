@@ -23,6 +23,15 @@ sessions: dict = {}           # session_id -> session dict
 active_session_id: str = None  # currently selected session
 scenarios: dict = {}          # scenario_id -> scenario snapshot
 
+# Line types that users are permitted to edit directly.
+# Computed lines (03, 04, 07-12) are intentionally excluded.
+EDITABLE_LINE_TYPES = {
+    '01. Demand forecast',
+    '05. Minimum target stock',
+    '06. Production plan',
+    '06. Purchase receipt',
+}
+
 SESSIONS_STORE = Path(__file__).parent.parent / 'sessions_store.json'
 
 
@@ -573,6 +582,11 @@ def _apply_edit_highlights(path: str, engine):
     wb.save(path)
 
 
+@app.route('/api/editable_line_types')
+def get_editable_line_types():
+    return jsonify({'editable': sorted(EDITABLE_LINE_TYPES)})
+
+
 @app.route('/api/update_volume', methods=['POST'])
 def update_volume():
     sess, current_engine = _get_active()
@@ -649,6 +663,8 @@ def _apply_volume_change(sess, current_engine, line_type, material_number, perio
 
     Used by /api/update_volume (via direct code), /api/undo, /api/redo.
     """
+    if line_type not in EDITABLE_LINE_TYPES:
+        return jsonify({'error': f'Line type "{line_type}" is not editable'}), 403
     rows = current_engine.results.get(line_type, [])
     target_row = next((r for r in rows if r.material_number == material_number), None)
     if target_row is None:
@@ -920,6 +936,97 @@ def _apply_volume_change(sess, current_engine, line_type, material_number, perio
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
+        current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+        current_engine.value_results = current_engine.value_engine.calculate()
+
+    elif line_type in (LineType.PRODUCTION_PLAN.value, LineType.PURCHASE_RECEIPT.value):
+        from modules.bom_engine import BOMEngine
+        from modules.capacity_engine import CapacityEngine
+        from modules.value_planning_engine import ValuePlanningEngine
+
+        periods_list = current_engine.data.periods
+
+        # Gather current rows (target_row already has new_value applied)
+        prod_row  = next((r for r in current_engine.results.get(LineType.PRODUCTION_PLAN.value, [])
+                          if r.material_number == material_number), None)
+        purch_row = next((r for r in current_engine.results.get(LineType.PURCHASE_RECEIPT.value, [])
+                          if r.material_number == material_number), None)
+        l03_row   = next((r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
+                          if r.material_number == material_number), None)
+
+        # Directly recompute L04 inventory balance from updated L06 + L07 + L03 + initial stock.
+        # We do NOT call calculate_for_material here because it would recalculate L06 from
+        # demand/target-stock rules, silently overwriting the user's manual edit.
+        inv_row = next((r for r in current_engine.results.get(LineType.INVENTORY.value, [])
+                        if r.material_number == material_number), None)
+        if inv_row:
+            initial_stock = current_engine.data.stock_levels.get(material_number, 0.0)
+            running = initial_stock
+            for p in periods_list:
+                demand = l03_row.values.get(p, 0.0)  if l03_row  else 0.0
+                prod   = prod_row.values.get(p, 0.0)  if prod_row  else 0.0
+                purch  = purch_row.values.get(p, 0.0) if purch_row else 0.0
+                running = running - demand + prod + purch
+                inv_row.values[p] = running
+
+        # Update in-memory production/purchase tracking dicts
+        if prod_row is not None:
+            current_engine.all_production_plans[material_number] = dict(prod_row.values)
+        if purch_row is not None:
+            current_engine.all_purchase_receipts[material_number] = dict(purch_row.values)
+
+        # Rebuild L08 dependent requirements from the (now updated) production plan
+        bom_eng = BOMEngine(current_engine.data)
+        current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value] = [
+            r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
+            if r.material_number != material_number
+        ]
+        children_demand = {}
+        if prod_row is not None:
+            children_demand = bom_eng.compute_dependent_requirements(
+                material_number, dict(prod_row.values)
+            )
+            if children_demand:
+                dr_rows = bom_eng.create_dependent_requirements_rows(material_number, children_demand)
+                current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
+
+        # Propagate to child materials: update their L02 dependent demand and L03 total demand
+        for child_mat, child_period_demand in children_demand.items():
+            current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
+                r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                if not (r.material_number == child_mat and r.aux_column == material_number)
+            ]
+            child_l02_new = bom_eng.create_dependent_demand_rows(
+                child_mat, {material_number: child_period_demand}
+            )
+            current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
+            child_l01_row = next(
+                (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+                 if r.material_number == child_mat), None
+            )
+            child_l03_row = next(
+                (r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
+                 if r.material_number == child_mat), None
+            )
+            if child_l03_row:
+                child_all_l02 = [
+                    r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                    if r.material_number == child_mat
+                ]
+                for p in periods_list:
+                    fc_val  = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
+                    dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
+                    child_l03_row.values[p] = fc_val + dep_val
+
+        # Re-run capacity engine (L09 machine requirements, L10 utilization, L11 FTE, L12)
+        l01_forecasts = {r.material_number: r.values
+                         for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+        cap_results = cap_eng.calculate()
+        for lt, cap_rows in cap_results.items():
+            current_engine.results[lt] = cap_rows
+
+        # Re-run value planning
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()
 
@@ -1198,6 +1305,183 @@ def delete_scenario(scenario_id):
         return jsonify({'error': 'Scenario belongs to a different session'}), 403
     del scenarios[scenario_id]
     return jsonify({'success': True})
+
+
+@app.route('/api/scenarios/compare', methods=['POST'])
+def compare_scenarios():
+    req = request.get_json() or {}
+    id_a = req.get('scenario_a_id', '')
+    id_b = req.get('scenario_b_id', '')
+    if id_a not in scenarios or id_b not in scenarios:
+        return jsonify({'error': 'Scenario not found'}), 404
+    sc_a = scenarios[id_a]
+    sc_b = scenarios[id_b]
+    if sc_a['session_id'] != active_session_id or sc_b['session_id'] != active_session_id:
+        return jsonify({'error': 'Scenarios belong to a different session'}), 403
+
+    diff_rows = []
+    for lt, rows_a in sc_a['results'].items():
+        rows_b_map = {r['material_number']: r for r in sc_b['results'].get(lt, [])}
+        for row_a in rows_a:
+            mat = row_a['material_number']
+            row_b = rows_b_map.get(mat)
+            if not row_b:
+                continue
+            diff = {p: round(row_a['values'].get(p, 0) - row_b['values'].get(p, 0), 4)
+                    for p in row_a['values']}
+            if any(abs(v) > 0.01 for v in diff.values()):
+                diff_rows.append({
+                    'material_number': mat,
+                    'line_type': lt,
+                    'values_a': row_a['values'],
+                    'values_b': row_b['values'],
+                    'diff': diff,
+                })
+
+    def _sum_diff(lt_key):
+        rows = [r for r in diff_rows if r['line_type'] == lt_key]
+        first = sc_a['results'].get(lt_key, [])
+        periods = list(first[0].get('values', {}).keys()) if first else []
+        return {p: round(sum(r['diff'].get(p, 0) for r in rows), 2) for p in periods}
+
+    summary = {
+        'scenario_a_name': sc_a['name'],
+        'scenario_b_name': sc_b['name'],
+        'total_demand_diff': _sum_diff('03. Total demand'),
+        'inventory_diff':    _sum_diff('04. Inventory'),
+        'changed_rows':      len(diff_rows),
+    }
+    return jsonify({'summary': summary, 'rows': diff_rows})
+
+
+@app.route('/api/scenarios/compare/export')
+def export_scenario_comparison():
+    id_a = request.args.get('a', '')
+    id_b = request.args.get('b', '')
+    if id_a not in scenarios or id_b not in scenarios:
+        return jsonify({'error': 'Scenario not found'}), 404
+    sc_a = scenarios[id_a]
+    sc_b = scenarios[id_b]
+    if sc_a['session_id'] != active_session_id or sc_b['session_id'] != active_session_id:
+        return jsonify({'error': 'Scenarios belong to a different session'}), 403
+
+    # ── Reuse compare logic ─────────────────────────────────────────────────
+    def _build_diff_rows(res_a, res_b):
+        rows = []
+        for lt, rows_a in res_a.items():
+            rows_b_map = {r['material_number']: r for r in res_b.get(lt, [])}
+            for row_a in rows_a:
+                mat = row_a['material_number']
+                row_b = rows_b_map.get(mat)
+                if not row_b:
+                    continue
+                diff = {p: round(row_a['values'].get(p, 0) - row_b['values'].get(p, 0), 4)
+                        for p in row_a['values']}
+                if any(abs(v) > 0.01 for v in diff.values()):
+                    rows.append({
+                        'material_number': mat,
+                        'material_name':   row_a.get('material_name', ''),
+                        'line_type':       lt,
+                        'values_a':        row_a['values'],
+                        'values_b':        row_b['values'],
+                        'diff':            diff,
+                    })
+        return rows
+
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    GREEN_FILL = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+    RED_FILL   = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    GREY_FILL  = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    HDR_FILL   = PatternFill(start_color='1F3864', end_color='1F3864', fill_type='solid')
+    ROW_A_FILL = PatternFill(start_color='EBF3FB', end_color='EBF3FB', fill_type='solid')
+    ROW_B_FILL = PatternFill(start_color='FEF9EE', end_color='FEF9EE', fill_type='solid')
+    HDR_FONT   = Font(bold=True, color='FFFFFF')
+    BOLD_FONT  = Font(bold=True)
+
+    def _write_sheet(ws, diff_rows):
+        if not diff_rows:
+            ws.append(['No differences found.'])
+            return
+        periods = list(diff_rows[0]['values_a'].keys())
+        # Header row
+        headers = ['Material Number', 'Material Name', 'Line Type', 'Row'] + periods + ['Total Diff']
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+            cell.alignment = Alignment(horizontal='center')
+
+        for dr in diff_rows:
+            mat  = dr['material_number']
+            name = dr['material_name']
+            lt   = dr['line_type']
+            va   = dr['values_a']
+            vb   = dr['values_b']
+            dv   = dr['diff']
+            # Row A (Scenario A values)
+            row_a_data = [mat, name, lt, sc_a['name']] + [va.get(p, 0) for p in periods] + [round(sum(va.get(p,0) for p in periods), 2)]
+            ws.append(row_a_data)
+            for cell in ws[ws.max_row]:
+                cell.fill = ROW_A_FILL
+            # Row B (Scenario B values)
+            row_b_data = [mat, name, lt, sc_b['name']] + [vb.get(p, 0) for p in periods] + [round(sum(vb.get(p,0) for p in periods), 2)]
+            ws.append(row_b_data)
+            for cell in ws[ws.max_row]:
+                cell.fill = ROW_B_FILL
+            # Diff row
+            total_diff = round(sum(dv.get(p, 0) for p in periods), 2)
+            diff_data  = [mat, name, lt, 'Diff (A−B)'] + [dv.get(p, 0) for p in periods] + [total_diff]
+            ws.append(diff_data)
+            diff_excel_row = ws.max_row
+            period_start_col = 5  # columns 1-4 are fixed metadata
+            for col_idx, p in enumerate(periods, start=period_start_col):
+                cell = ws.cell(row=diff_excel_row, column=col_idx)
+                cell.font = BOLD_FONT
+                v = dv.get(p, 0)
+                if v > 0.01:
+                    cell.fill = GREEN_FILL
+                elif v < -0.01:
+                    cell.fill = RED_FILL
+            # Total diff cell
+            total_cell = ws.cell(row=diff_excel_row, column=len(headers))
+            total_cell.font = BOLD_FONT
+            if total_diff > 0.01:
+                total_cell.fill = GREEN_FILL
+            elif total_diff < -0.01:
+                total_cell.fill = RED_FILL
+            # Grey separator row
+            ws.append([''] * len(headers))
+            for cell in ws[ws.max_row]:
+                cell.fill = GREY_FILL
+
+        # Auto-width for first 4 columns
+        for col_idx in range(1, 5):
+            max_len = max((len(str(ws.cell(r, col_idx).value or '')) for r in range(1, ws.max_row + 1)), default=10)
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 2, 40)
+
+    wb = openpyxl.Workbook()
+    # Volume sheet
+    ws_vol = wb.active
+    ws_vol.title = 'Volume Comparison'
+    vol_diff = _build_diff_rows(sc_a['results'], sc_b['results'])
+    _write_sheet(ws_vol, vol_diff)
+
+    # Value sheet
+    ws_val = wb.create_sheet('Value Comparison')
+    val_diff = _build_diff_rows(sc_a.get('value_results', {}), sc_b.get('value_results', {}))
+    _write_sheet(ws_val, val_diff)
+
+    export_dir = Path(__file__).parent.parent / 'exports'
+    export_dir.mkdir(exist_ok=True)
+    safe_a = ''.join(c for c in sc_a['name'] if c.isalnum() or c in ' _-')[:30]
+    safe_b = ''.join(c for c in sc_b['name'] if c.isalnum() or c in ' _-')[:30]
+    filename = f'Comparison_{safe_a}_vs_{safe_b}.xlsx'
+    export_path = export_dir / filename
+    wb.save(str(export_path))
+    return send_file(str(export_path), as_attachment=True, download_name=filename)
 
 
 # ---- Session management endpoints ----
