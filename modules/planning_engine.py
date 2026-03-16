@@ -483,7 +483,8 @@ class PlanningEngine:
             wb = writer.book
             self._apply_excel_formatting(wb['Planning sheet'])
             if not df_values.empty:
-                self._apply_excel_formatting(wb['Values_Planning sheet'])
+                self._apply_excel_formatting(wb['Values_Planning sheet'], is_values_sheet=True)
+                self._apply_consol_colors(wb['Values_Planning sheet'])
 
             # Freeze header row and metadata columns (VBA: freeze above row 2, left of col L)
             wb['Planning sheet'].freeze_panes = 'L2'
@@ -903,13 +904,18 @@ class PlanningEngine:
         if iq_chart_done:
             print(f"  - Inventory quality chart")
 
-    def _apply_excel_formatting(self, ws):
+    def _apply_excel_formatting(self, ws, is_values_sheet=False):
         """Apply VBA-matching cell formatting to a planning worksheet.
 
+        Parameters
+        ----------
+        is_values_sheet : bool
+            When True, financial number format '#,##0.00' is used instead of '#,##0',
+            and the Starting stock column also receives this format.
+
         Rules applied:
-        • #,##0 number format on period data columns
+        • #,##0 (Planning) / #,##0.00 (Values_Planning) number format on data columns
         • 0.0% format on Line 10 (Utilization rate) data cells
-        • Light-blue fill (DAEEF3) on Line 04 (Inventory) rows
         • Dynamic CF: red (FFC7CE) on L04 < 0, L10 > 100%; orange (FFC896) on L10 < 30%
         • Dynamic CF: purple (C8A2C8) on L09 < 1 (availability is 0.0-1.0 scale)
         • L10 rules only applied to production rows where material starts with 'Z_'
@@ -920,7 +926,6 @@ class PlanningEngine:
         from openpyxl.formatting.rule import CellIsRule
         import re
 
-        blue_fill   = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
         bold_font   = Font(bold=True)
         # Dynamic CF fills (written as rules, not static fills)
         cf_red    = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
@@ -928,17 +933,42 @@ class PlanningEngine:
         cf_purple = PatternFill(start_color='C8A2C8', end_color='C8A2C8', fill_type='solid')
         dotted      = Side(border_style='dotted', color='000000')
 
+        def _pf(hex_color):
+            return PatternFill(start_color=hex_color, end_color=hex_color, fill_type='solid')
+
+        # Per-line-type row fills (VBA extracted_vba.txt lines 5630–5904)
+        line_type_colors = {
+            '01. Demand forecast':        _pf('E2EFDA'),  # light green
+            '02. Dependent demand':       _pf('EDEDED'),  # light grey
+            '03. Total demand':           _pf('DAEEF3'),  # light blue
+            '04. Inventory':              _pf('FFF2CC'),  # light yellow
+            '05. Minimum target stock':   _pf('E2EFDA'),  # light green
+            '06. Production plan':        _pf('FCE4D6'),  # light peach
+            '06. Purchase receipt':       _pf('FCE4D6'),  # light peach
+            '07. Purchase plan':          _pf('D9E1F2'),  # light blue-grey
+            '07. Capacity utilization':   _pf('D9E1F2'),  # light blue-grey
+            '08. Dependent requirements': _pf('F2F2F2'),  # very light grey
+            '09. Available capacity':     _pf('E2EFDA'),  # light green
+            '10. Utilization rate':       _pf('FCE4D6'),  # light peach
+            '11. Shift availability':     _pf('D9D9D9'),  # medium grey
+            '12. FTE requirements':       _pf('FFF2CC'),  # light yellow
+        }
+
         total_cols = ws.max_column
         period_re  = re.compile(r'^\d{4}-\d{2}$')
 
+        num_fmt = '#,##0.00' if is_values_sheet else '#,##0'
+
         # Locate key columns by reading the header row
-        line_type_col = mat_num_col = data_col_start = None
+        line_type_col = mat_num_col = data_col_start = starting_stock_col = None
         for cell in ws[1]:
             hdr = str(cell.value or '')
             if hdr == 'Line type':
                 line_type_col = cell.column
             elif hdr == 'Material number':
                 mat_num_col = cell.column
+            elif hdr == 'Starting stock':
+                starting_stock_col = cell.column
             elif period_re.match(hdr) and data_col_start is None:
                 data_col_start = cell.column
 
@@ -989,6 +1019,12 @@ class PlanningEngine:
             elif is_l10 and str(mat or '').startswith('Z_'):
                 _cf_l10_rows.append(excel_row)
 
+            # Apply per-line-type row fill to all columns
+            row_fill = line_type_colors.get(str(lt or ''))
+            if row_fill:
+                for _c in range(1, total_cols + 1):
+                    ws.cell(row=excel_row, column=_c).fill = row_fill
+
             for col in range(1, total_cols + 1):
                 cell = ws.cell(row=excel_row, column=col)
                 is_data = col >= data_col_start
@@ -996,6 +1032,10 @@ class PlanningEngine:
                 # Bold for Total demand rows (all columns)
                 if is_l03:
                     cell.font = bold_font
+
+                # Apply number format to Starting stock column even though it's not a period
+                if starting_stock_col and col == starting_stock_col:
+                    cell.number_format = num_fmt
 
                 if not is_data:
                     continue
@@ -1007,11 +1047,7 @@ class PlanningEngine:
                 if is_l10:
                     cell.number_format = '0.0%'
                 else:
-                    cell.number_format = '#,##0'
-
-                # Fill: Inventory (Line 04) — static blue fill only
-                if is_l04:
-                    cell.fill = blue_fill
+                    cell.number_format = num_fmt
 
         # Dynamic conditional formatting (VBA ApplyConditionalFormatting line 4144)
         if data_col_start is not None and data_col_start <= total_cols:
@@ -1034,6 +1070,88 @@ class PlanningEngine:
             for _rn in _cf_l09_rows:
                 _rng = f'{start_letter}{_rn}:{end_letter}{_rn}'
                 ws.conditional_formatting.add(_rng, CellIsRule(operator='lessThan', formula=['1'], fill=cf_purple))
+
+        # ---- Column widths ----
+        from openpyxl.utils import get_column_letter as _gcl_w
+        _named_widths = {
+            'Material number': 18, 'Material name': 22, 'Line type': 22,
+            'Product type': 14, 'Product family': 14, 'SPC product': 14,
+            'Product cluster': 14, 'Product name': 18,
+            'Aux Column': 14, 'Aux 2 Column': 14, 'Starting stock': 14,
+        }
+        for _hcell in ws[1]:
+            _hw = _named_widths.get(str(_hcell.value or ''))
+            if _hw:
+                ws.column_dimensions[_gcl_w(_hcell.column)].width = _hw
+            elif data_col_start is not None and _hcell.column >= data_col_start:
+                ws.column_dimensions[_gcl_w(_hcell.column)].width = 12
+
+    def _apply_consol_colors(self, ws):
+        """Apply VBA-matching colors and bold to ZZZZZZ_ consolidation rows on Values_Planning sheet."""
+        from openpyxl.styles import PatternFill, Font
+
+        def _pf(hex_color):
+            return PatternFill(start_color=hex_color, end_color=hex_color, fill_type='solid')
+
+        consol_colors = {
+            'TURNOVER':                      _pf('A9D08E'),  # RGB(169,208,142) green
+            'RAW MATERIAL COST':             _pf('FCE4D6'),  # RGB(252,228,214) light peach
+            'MACHINE COST':                  _pf('FCE4D6'),
+            'DIRECT FTE COST':               _pf('FCE4D6'),
+            'INDIRECT FTE COST':             _pf('FCE4D6'),
+            'OVERHEAD COST':                 _pf('FCE4D6'),
+            'COST OF GOODS':                 _pf('F8CBAD'),  # RGB(248,203,173) peach
+            'GROSS MARGIN':                  _pf('A0D078'),  # RGB(160,208,120) medium green
+            'SG&A COST':                     _pf('FCE4D6'),
+            'EBITDA':                        _pf('FFE699'),  # RGB(255,230,153) medium yellow
+            'D&A COST':                      _pf('FCE4D6'),
+            'EBIT':                          _pf('FFE699'),  # RGB(255,230,153) medium yellow
+            'FIXED ASSETS NET BOOK VALUE':   _pf('FCE4D6'),  # peach (VBA line 5812+)
+            'INVENTORY VALUE':               _pf('FCE4D6'),
+            'RECEIVABLES':                   _pf('FCE4D6'),
+            'PAYABLES':                      _pf('FCE4D6'),
+            'WORKING CAPITAL REQUIREMENTS':  _pf('FFE699'),  # yellow (VBA line 5860+)
+            'CAPITAL INVESTMENT':            _pf('FFE699'),
+            'OPERATIONAL CASHFLOW':          _pf('FFE699'),
+            'ROCE':                          _pf('A9D08E'),  # same green as TURNOVER
+        }
+
+        # Rows that receive bold formatting (key summary lines)
+        bold_keys = {
+            'COST OF GOODS', 'GROSS MARGIN', 'EBITDA', 'EBIT', 'ROCE',
+        }
+
+        mat_num_col = None
+        for cell in ws[1]:
+            if str(cell.value or '') == 'Material number':
+                mat_num_col = cell.column
+                break
+        if mat_num_col is None:
+            return
+
+        total_cols = ws.max_column
+        for excel_row in range(2, ws.max_row + 1):
+            mat_num = ws.cell(row=excel_row, column=mat_num_col).value
+            if not mat_num or not str(mat_num).startswith('ZZZZZZ_'):
+                continue
+            key = str(mat_num).replace('ZZZZZZ_', '')
+            fill = consol_colors.get(key)
+            is_bold = key in bold_keys
+            if fill or is_bold:
+                for col in range(1, total_cols + 1):
+                    cell = ws.cell(row=excel_row, column=col)
+                    if fill:
+                        cell.fill = fill
+                    if is_bold:
+                        # Preserve existing font properties, only set bold
+                        existing = cell.font
+                        cell.font = Font(
+                            bold=True,
+                            name=existing.name,
+                            size=existing.size,
+                            color=existing.color,
+                            italic=existing.italic,
+                        )
 
     def _apply_fte_formatting(self, ws, period_cols):
         """Apply formatting to the FTE requirements sheet."""

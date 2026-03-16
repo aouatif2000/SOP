@@ -21,6 +21,68 @@ import uuid as _uuid
 
 sessions: dict = {}           # session_id -> session dict
 active_session_id: str = None  # currently selected session
+scenarios: dict = {}          # scenario_id -> scenario snapshot
+
+SESSIONS_STORE = Path(__file__).parent.parent / 'sessions_store.json'
+
+
+def _save_sessions_to_disk():
+    """Persist session metadata (no engine objects) to sessions_store.json."""
+    try:
+        serializable = {}
+        for sid, sess in sessions.items():
+            serializable[sid] = {
+                'id':          sess.get('id', sid),
+                'file_path':   sess.get('file_path', ''),
+                'filename':    sess.get('filename', ''),
+                'custom_name': sess.get('custom_name'),
+                'metadata':    sess.get('metadata', {}),
+                'uploaded_at': sess.get('uploaded_at', ''),
+                'parameters':  sess.get('parameters'),
+            }
+        store = {
+            'active_session_id': active_session_id,
+            'sessions':          serializable,
+        }
+        with open(SESSIONS_STORE, 'w', encoding='utf-8') as f:
+            json.dump(store, f, indent=2, default=str)
+    except Exception as exc:
+        print(f'[sessions] save error: {exc}')
+
+
+def _load_sessions_from_disk():
+    """Restore session metadata from sessions_store.json on startup."""
+    global sessions, active_session_id
+    if not SESSIONS_STORE.exists():
+        return
+    try:
+        with open(SESSIONS_STORE, 'r', encoding='utf-8') as f:
+            store = json.load(f)
+        for sid, data in store.get('sessions', {}).items():
+            sessions[sid] = {
+                'id':           data.get('id', sid),
+                'file_path':    data.get('file_path', ''),
+                'filename':     data.get('filename', ''),
+                'custom_name':  data.get('custom_name'),
+                'engine':       None,   # must re-calculate after restart
+                'value_results': {},
+                'metadata':     data.get('metadata', {}),
+                'uploaded_at':  data.get('uploaded_at', ''),
+                'parameters':   data.get('parameters'),
+                'undo_stack':   [],
+                'redo_stack':   [],
+            }
+        saved_active = store.get('active_session_id')
+        if saved_active and saved_active in sessions:
+            active_session_id = saved_active
+        elif sessions:
+            active_session_id = next(iter(sessions))
+        print(f'[sessions] loaded {len(sessions)} session(s) from disk')
+    except Exception as exc:
+        print(f'[sessions] load error: {exc}')
+
+
+_load_sessions_from_disk()
 
 
 def _get_active():
@@ -80,7 +142,10 @@ def upload_file():
             },
             'uploaded_at': datetime.now().isoformat(),
         }
+        sessions[session_id]['undo_stack'] = []
+        sessions[session_id]['redo_stack'] = []
         active_session_id = session_id
+        _save_sessions_to_disk()
 
         return jsonify({
             'success': True,
@@ -129,6 +194,12 @@ def run_calculations():
         )
         engine.run()
         sess['engine'] = engine
+        sess['parameters'] = {
+            'planning_month':  planning_month,
+            'months_actuals':  months_actuals,
+            'months_forecast': months_forecast,
+        }
+        _save_sessions_to_disk()
 
         return jsonify({
             'success': True,
@@ -504,7 +575,7 @@ def _apply_edit_highlights(path: str, engine):
 
 @app.route('/api/update_volume', methods=['POST'])
 def update_volume():
-    _, current_engine = _get_active()
+    sess, current_engine = _get_active()
 
     if current_engine is None:
         return jsonify({'error': 'No calculations run'}), 400
@@ -518,6 +589,66 @@ def update_volume():
     period = data.get('period')
     new_value = float(data.get('new_value', 0))
 
+    return _apply_volume_change(sess, current_engine, line_type, material_number, period, new_value,
+                                 push_undo=True)
+
+
+@app.route('/api/undo', methods=['POST'])
+def undo_edit():
+    sess, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    undo_stack = sess.get('undo_stack', [])
+    redo_stack = sess.setdefault('redo_stack', [])
+    if not undo_stack:
+        return jsonify({'error': 'Nothing to undo'}), 400
+
+    entry = undo_stack.pop()
+    line_type = entry['line_type']
+    material_number = entry['material_number']
+    period = entry['period']
+    restore_value = entry['old_value']
+
+    # Push onto redo stack before restoring
+    redo_stack.append(entry)
+    if len(redo_stack) > 50:
+        redo_stack.pop(0)
+
+    # Apply restored value by delegating to update_volume logic (via internal helper)
+    return _apply_volume_change(sess, current_engine, line_type, material_number, period, restore_value,
+                                 push_undo=False)
+
+
+@app.route('/api/redo', methods=['POST'])
+def redo_edit():
+    sess, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    undo_stack = sess.setdefault('undo_stack', [])
+    redo_stack = sess.get('redo_stack', [])
+    if not redo_stack:
+        return jsonify({'error': 'Nothing to redo'}), 400
+
+    entry = redo_stack.pop()
+    line_type = entry['line_type']
+    material_number = entry['material_number']
+    period = entry['period']
+    redo_value = entry['new_value']
+
+    undo_stack.append(entry)
+    if len(undo_stack) > 50:
+        undo_stack.pop(0)
+
+    return _apply_volume_change(sess, current_engine, line_type, material_number, period, redo_value,
+                                 push_undo=False)
+
+
+def _apply_volume_change(sess, current_engine, line_type, material_number, period, new_value,
+                          push_undo=True):
+    """Internal helper: apply a volume change + cascade and return jsonify result.
+
+    Used by /api/update_volume (via direct code), /api/undo, /api/redo.
+    """
     rows = current_engine.results.get(line_type, [])
     target_row = next((r for r in rows if r.material_number == material_number), None)
     if target_row is None:
@@ -525,17 +656,27 @@ def update_volume():
 
     old_value = target_row.get_value(period)
 
-    # Preserve the very first original value
+    if push_undo:
+        undo_stack = sess.setdefault('undo_stack', [])
+        sess.setdefault('redo_stack', []).clear()
+        undo_stack.append({'line_type': line_type, 'material_number': material_number,
+                           'period': period, 'old_value': old_value, 'new_value': new_value})
+        if len(undo_stack) > 50:
+            undo_stack.pop(0)
+
+    # Update manual_edits tracking
     if period not in target_row.manual_edits:
         target_row.manual_edits[period] = {'original': old_value, 'new': new_value}
     else:
         target_row.manual_edits[period]['new'] = new_value
+    # If restored to original, remove the edit tracking entry
+    original_val = target_row.manual_edits[period].get('original', old_value)
+    if new_value == original_val:
+        target_row.manual_edits.pop(period, None)
 
     target_row.set_value(period, new_value)
 
     if line_type == LineType.MIN_TARGET_STOCK.value:
-        # Full cascade: Line 05 → Line 06 (prod+purch) → Line 04 (inventory) →
-        #   Line 07 (purchase plan) → Line 08 (dep req) → Lines 07cap/09/10/11/12 → values
         from modules.inventory_engine import InventoryEngine
         from modules.capacity_engine import CapacityEngine
         from modules.bom_engine import BOMEngine
@@ -543,13 +684,9 @@ def update_volume():
 
         preserved_edits = dict(target_row.manual_edits)
         periods_list = current_engine.data.periods
-
-        # Reconstruct forecast (Line 01) for this material
         l01_rows = current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
         fc_row = next((r for r in l01_rows if r.material_number == material_number), None)
         forecast_vals = dict(fc_row.values) if fc_row else {p: 0.0 for p in periods_list}
-
-        # Reconstruct aggregated + per-parent dependent demand (Line 02)
         l02_rows = current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
         mat_l02 = [r for r in l02_rows if r.material_number == material_number]
         dep_demand_agg = {p: 0.0 for p in periods_list}
@@ -560,15 +697,11 @@ def update_volume():
                 dep_demand_by_parent[parent] = dict(r.values)
                 for p in periods_list:
                     dep_demand_agg[p] = dep_demand_agg.get(p, 0.0) + r.values.get(p, 0.0)
-
-        # Step 1-4: re-run inventory engine with overridden target stock
         inv_eng = InventoryEngine(current_engine.data)
         inv_result = inv_eng.calculate_for_material(
             material_number, forecast_vals, dep_demand_agg, dep_demand_by_parent,
             override_target_stock=new_value
         )
-
-        # Replace Lines 03/04/05/06/07-purchplan for this material
         inv_line_types = [
             LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
             LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
@@ -581,16 +714,12 @@ def update_volume():
         for row in inv_result['rows']:
             if row.line_type in current_engine.results:
                 current_engine.results[row.line_type].append(row)
-
-        # Restore manual_edits onto the newly created Line 05 row
         new_l05 = next(
             (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
              if r.material_number == material_number), None
         )
         if new_l05:
             new_l05.manual_edits = preserved_edits
-
-        # Update cross-material production tracking dicts
         if inv_result['production_plan'] is not None:
             current_engine.all_production_plans[material_number] = inv_result['production_plan']
         else:
@@ -599,8 +728,6 @@ def update_volume():
             current_engine.all_purchase_receipts[material_number] = inv_result['purchase_receipt']
         else:
             current_engine.all_purchase_receipts.pop(material_number, None)
-
-        # Step 7: Rebuild Line 08 (Dependent Requirements) for this material
         bom_eng = BOMEngine(current_engine.data)
         current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value] = [
             r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
@@ -614,10 +741,7 @@ def update_volume():
             if children_demand:
                 dr_rows = bom_eng.create_dependent_requirements_rows(material_number, children_demand)
                 current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
-
-        # Steps 10/11: Update child Line 02 and recalculate child Line 03
         for child_mat, child_period_demand in children_demand.items():
-            # Remove the stale contribution of this parent from child's Line 02
             current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
                 r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
                 if not (r.material_number == child_mat and r.aux_column == material_number)
@@ -626,8 +750,6 @@ def update_volume():
                 child_mat, {material_number: child_period_demand}
             )
             current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
-
-            # Recompute child Line 03 = child L01 + all child L02 rows
             child_l01_row = next(
                 (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
                  if r.material_number == child_mat), None
@@ -645,34 +767,24 @@ def update_volume():
                     fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
                     dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
                     child_l03_row.values[p] = fc_val + dep_val
-
-        # Steps 6/8/9/10: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
         l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
         cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
-
-        # Re-run value planning
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()
 
     elif line_type == LineType.DEMAND_FORECAST.value:
-        # Full cascade: Line 01 → Lines 03-07 → Line 08 → child Lines 02/03
-        #   → Lines 07cap/09/10/11/12 → values
         from modules.inventory_engine import InventoryEngine
         from modules.capacity_engine import CapacityEngine
         from modules.bom_engine import BOMEngine
         from modules.value_planning_engine import ValuePlanningEngine
 
         periods_list = current_engine.data.periods
-
-        # Reconstruct forecast (Line 01) — already has new_value applied via set_value above
         l01_rows = current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
         fc_row = next((r for r in l01_rows if r.material_number == material_number), None)
         forecast_vals = dict(fc_row.values) if fc_row else {p: 0.0 for p in periods_list}
-
-        # Reconstruct aggregated + per-parent dependent demand (Line 02)
         l02_rows = current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
         mat_l02 = [r for r in l02_rows if r.material_number == material_number]
         dep_demand_agg = {p: 0.0 for p in periods_list}
@@ -683,21 +795,15 @@ def update_volume():
                 dep_demand_by_parent[parent] = dict(r.values)
                 for p in periods_list:
                     dep_demand_agg[p] = dep_demand_agg.get(p, 0.0) + r.values.get(p, 0.0)
-
-        # Save current Line 05 — VBA step 3: target stock stays unchanged
         l05_rows = current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
         l05_row = next((r for r in l05_rows if r.material_number == material_number), None)
         l05_saved_values = dict(l05_row.values) if l05_row else {}
         l05_saved_edits = dict(l05_row.manual_edits) if l05_row else {}
-
-        # Steps 1/2/4/5/6: re-run inventory engine with updated forecast
         inv_eng = InventoryEngine(current_engine.data)
         inv_result = inv_eng.calculate_for_material(
             material_number, forecast_vals, dep_demand_agg, dep_demand_by_parent,
             override_forecast=forecast_vals,
         )
-
-        # Replace Lines 03/04/05/06/07-purchplan for this material
         inv_line_types = [
             LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
             LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
@@ -710,8 +816,6 @@ def update_volume():
         for row in inv_result['rows']:
             if row.line_type in current_engine.results:
                 current_engine.results[row.line_type].append(row)
-
-        # Step 3: Restore Line 05 to pre-cascade values (stays unchanged per VBA)
         new_l05 = next(
             (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
              if r.material_number == material_number), None
@@ -719,8 +823,6 @@ def update_volume():
         if new_l05:
             new_l05.values = l05_saved_values
             new_l05.manual_edits = l05_saved_edits
-
-        # Update cross-material production tracking dicts
         if inv_result['production_plan'] is not None:
             current_engine.all_production_plans[material_number] = inv_result['production_plan']
         else:
@@ -729,8 +831,6 @@ def update_volume():
             current_engine.all_purchase_receipts[material_number] = inv_result['purchase_receipt']
         else:
             current_engine.all_purchase_receipts.pop(material_number, None)
-
-        # Step 9: Rebuild Line 08 (Dependent Requirements) for this material
         bom_eng = BOMEngine(current_engine.data)
         current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value] = [
             r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
@@ -744,10 +844,7 @@ def update_volume():
             if children_demand:
                 dr_rows = bom_eng.create_dependent_requirements_rows(material_number, children_demand)
                 current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
-
-        # Steps 10/11: Update child Line 02 and recalculate child Line 03
         for child_mat, child_period_demand in children_demand.items():
-            # Remove the stale contribution of this parent from child's Line 02
             current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
                 r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
                 if not (r.material_number == child_mat and r.aux_column == material_number)
@@ -756,8 +853,6 @@ def update_volume():
                 child_mat, {material_number: child_period_demand}
             )
             current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
-
-            # Recompute child Line 03 = child L01 + all child L02 rows
             child_l01_row = next(
                 (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
                  if r.material_number == child_mat), None
@@ -775,11 +870,8 @@ def update_volume():
                     fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
                     dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
                     child_l03_row.values[p] = fc_val + dep_val
-
-            # Recalculate child inventory lines (L04/L05/L06/L07)
             child_forecast_row = child_l01_row
             child_forecast_vals = dict(child_forecast_row.values) if child_forecast_row else {p: 0.0 for p in periods_list}
-
             child_dep_agg = {p: 0.0 for p in periods_list}
             child_dep_by_parent = {}
             for r in child_all_l02:
@@ -788,18 +880,14 @@ def update_volume():
                     child_dep_by_parent[parent] = dict(r.values)
                     for p in periods_list:
                         child_dep_agg[p] += r.values.get(p, 0.0)
-
-            # Save child L05 (target stock stays unchanged per VBA)
             child_l05_rows = current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
             child_l05 = next((r for r in child_l05_rows if r.material_number == child_mat), None)
             child_l05_saved = dict(child_l05.values) if child_l05 else {}
             child_l05_edits = dict(child_l05.manual_edits) if child_l05 else {}
-
             child_inv_result = inv_eng.calculate_for_material(
                 child_mat, child_forecast_vals, child_dep_agg, child_dep_by_parent,
                 override_forecast=child_forecast_vals,
             )
-
             child_inv_types = [
                 LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
                 LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
@@ -812,7 +900,6 @@ def update_volume():
             for row in child_inv_result['rows']:
                 if row.line_type in current_engine.results:
                     current_engine.results[row.line_type].append(row)
-
             new_child_l05 = next(
                 (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
                  if r.material_number == child_mat), None
@@ -820,7 +907,6 @@ def update_volume():
             if new_child_l05:
                 new_child_l05.values = child_l05_saved
                 new_child_l05.manual_edits = child_l05_edits
-
             if child_inv_result['production_plan'] is not None:
                 current_engine.all_production_plans[child_mat] = child_inv_result['production_plan']
             else:
@@ -829,30 +915,23 @@ def update_volume():
                 current_engine.all_purchase_receipts[child_mat] = child_inv_result['purchase_receipt']
             else:
                 current_engine.all_purchase_receipts.pop(child_mat, None)
-
-        # Steps 8/12/13: Re-run capacity engine (Lines 07cap, 09, 10, 11, 12)
         l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
         cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
-
-        # Step 14: Re-run value planning
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()
 
     else:
-        # Line 06: value already set above; just refresh value planning
         from modules.value_planning_engine import ValuePlanningEngine
         current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
         current_engine.value_results = current_engine.value_engine.calculate()
 
     delta_pct = round((new_value - old_value) / abs(old_value) * 100, 2) if old_value != 0 else 0.0
-
     results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
     value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
     consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
-
     return jsonify({
         'success': True,
         'results': results_dict,
@@ -977,6 +1056,150 @@ def reset_edits():
     })
 
 
+# ---- Scenario endpoints ----
+
+@app.route('/api/scenarios', methods=['GET'])
+def list_scenarios():
+    """List saved scenarios for the active session."""
+    result = [
+        {
+            'id':         sid,
+            'name':       sc['name'],
+            'session_id': sc['session_id'],
+            'timestamp':  sc['timestamp'],
+            'edit_count': sc['edit_count'],
+        }
+        for sid, sc in scenarios.items()
+        if sc['session_id'] == active_session_id
+    ]
+    result.sort(key=lambda x: x['timestamp'])
+    return jsonify({'scenarios': result})
+
+
+@app.route('/api/scenarios/save', methods=['POST'])
+def save_scenario():
+    """Deep-copy current volumes + cascaded values into a named scenario."""
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    req = request.get_json() or {}
+    name = req.get('name', '').strip()
+    if not name:
+        return jsonify({'error': 'Scenario name is required'}), 400
+
+    # Snapshot results: {lt: [{material_number, line_type, values, manual_edits, ...}]}
+    results_snapshot = {}
+    total_edits = 0
+    for lt, rows in current_engine.results.items():
+        results_snapshot[lt] = []
+        for row in rows:
+            results_snapshot[lt].append({
+                'material_number': row.material_number,
+                'material_name':   row.material_name,
+                'line_type':       row.line_type,
+                'aux_column':      row.aux_column,
+                'values':          dict(row.values),
+                'manual_edits':    {p: dict(e) for p, e in row.manual_edits.items()},
+            })
+            total_edits += len(row.manual_edits)
+
+    # Snapshot value_results
+    value_snapshot = {}
+    for lt, rows in current_engine.value_results.items():
+        value_snapshot[lt] = []
+        for row in rows:
+            value_snapshot[lt].append({
+                'material_number': row.material_number,
+                'material_name':   row.material_name,
+                'line_type':       row.line_type,
+                'aux_column':      row.aux_column,
+                'values':          dict(row.values),
+                'manual_edits':    {},
+            })
+
+    scenario_id = str(_uuid.uuid4())
+    scenarios[scenario_id] = {
+        'id':             scenario_id,
+        'name':           name,
+        'session_id':     active_session_id,
+        'timestamp':      datetime.now().isoformat(),
+        'edit_count':     total_edits,
+        'results':        results_snapshot,
+        'value_results':  value_snapshot,
+    }
+    return jsonify({'success': True, 'scenario_id': scenario_id, 'name': name, 'edit_count': total_edits})
+
+
+@app.route('/api/scenarios/load', methods=['POST'])
+def load_scenario():
+    """Restore a saved scenario into the active engine."""
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    req = request.get_json() or {}
+    scenario_id = req.get('scenario_id', '')
+    if not scenario_id or scenario_id not in scenarios:
+        return jsonify({'error': 'Scenario not found'}), 404
+
+    sc = scenarios[scenario_id]
+    if sc['session_id'] != active_session_id:
+        return jsonify({'error': 'Scenario belongs to a different session'}), 403
+
+    # Restore values and manual_edits on each PlanningRow
+    for lt, snap_rows in sc['results'].items():
+        live_rows = current_engine.results.get(lt, [])
+        for snap in snap_rows:
+            target = next(
+                (r for r in live_rows
+                 if r.material_number == snap['material_number'] and r.line_type == snap['line_type']),
+                None
+            )
+            if target is None:
+                continue
+            for p, v in snap['values'].items():
+                target.set_value(p, v)
+            target.manual_edits = {p: dict(e) for p, e in snap['manual_edits'].items()}
+
+    # Restore value_results
+    for lt, snap_rows in sc['value_results'].items():
+        live_rows = current_engine.value_results.get(lt, [])
+        for snap in snap_rows:
+            target = next(
+                (r for r in live_rows
+                 if r.material_number == snap['material_number'] and r.line_type == snap['line_type']),
+                None
+            )
+            if target is None:
+                continue
+            for p, v in snap['values'].items():
+                target.set_value(p, v)
+
+    results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+    value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+    consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+
+    return jsonify({
+        'success':       True,
+        'scenario_id':   scenario_id,
+        'name':          sc['name'],
+        'results':       results_dict,
+        'value_results': value_results_dict,
+        'consolidation': consolidation,
+    })
+
+
+@app.route('/api/scenarios/<scenario_id>', methods=['DELETE'])
+def delete_scenario(scenario_id):
+    if scenario_id not in scenarios:
+        return jsonify({'error': 'Scenario not found'}), 404
+    if scenarios[scenario_id]['session_id'] != active_session_id:
+        return jsonify({'error': 'Scenario belongs to a different session'}), 403
+    del scenarios[scenario_id]
+    return jsonify({'success': True})
+
+
 # ---- Session management endpoints ----
 
 @app.route('/api/sessions')
@@ -1015,6 +1238,7 @@ def rename_session():
     if not new_name:
         return jsonify({'error': 'Name cannot be empty'}), 400
     sessions[session_id]['custom_name'] = new_name
+    _save_sessions_to_disk()
     return jsonify({'success': True, 'session_id': session_id, 'custom_name': new_name})
 
 
@@ -1032,6 +1256,7 @@ def switch_session():
         'success': True,
         'active_session_id': sid,
         'filename': sess.get('filename', ''),
+        'custom_name': sess.get('custom_name'),
         'metadata': sess.get('metadata', {}),
         'calculated': sess.get('engine') is not None,
     })
@@ -1046,7 +1271,37 @@ def delete_session(session_id):
     del sessions[session_id]
     if active_session_id == session_id:
         active_session_id = next(iter(sessions), None)
+    _save_sessions_to_disk()
     return jsonify({'success': True, 'active_session_id': active_session_id})
+
+
+_SESSION_SAVE_PATHS = {
+    '/api/sessions/rename',
+    '/api/sessions/switch',
+    '/api/upload',
+    '/api/calculate',
+    '/api/update_volume',
+    '/api/undo',
+    '/api/redo',
+    '/api/reset_edits',
+    '/api/scenarios/save',
+    '/api/scenarios/load',
+}
+
+_SESSION_SAVE_METHODS = {'POST', 'DELETE'}
+
+
+@app.after_request
+def _after_request_save(response):
+    """Auto-save sessions to disk after any mutating request."""
+    if request.method in _SESSION_SAVE_METHODS and (
+        request.path in _SESSION_SAVE_PATHS
+        or (request.method == 'DELETE' and request.path.startswith('/api/sessions/'))
+        or (request.method == 'DELETE' and request.path.startswith('/api/scenarios/'))
+    ):
+        if response.status_code < 500:
+            _save_sessions_to_disk()
+    return response
 
 
 if __name__ == '__main__':

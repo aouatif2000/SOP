@@ -198,6 +198,256 @@ def _print_results(results: dict, title: str):
     return line_results, grand_match, grand_total
 
 
+# ---- Raw-record collectors (for Excel report & top-10 analysis) ----
+
+def _build_comparison_records(py_df: pd.DataFrame, xl_df: pd.DataFrame,
+                               sheet_label: str,
+                               rate_types=None, roce_types=None) -> list:
+    """Return a list of dicts for EVERY compared period cell.
+    Keys: sheet, line_type, material, period, xl_val, py_val, diff, tol, pass, missing.
+    """
+    rate_types = rate_types or RATE_LINE_TYPES
+    roce_types = roce_types or set()
+
+    xl_pm     = _xl_period_map(xl_df)
+    py_periods = {_period_str(c): c for c in py_df.columns}
+
+    xl_df = xl_df.copy(); py_df = py_df.copy()
+    xl_df['_mat'] = xl_df.iloc[:, 0].astype(str).str.strip()
+    xl_df['_lt']  = xl_df.iloc[:, 7].astype(str).str.strip()
+    py_df['_mat'] = py_df['Material number'].astype(str).str.strip()
+    py_df['_lt']  = py_df['Line type'].astype(str).str.strip()
+
+    py_idx = defaultdict(list)
+    for _, row in py_df.iterrows():
+        py_idx[(row['_mat'], row['_lt'])].append(row)
+
+    records = []
+    for _, xl_row in xl_df.iterrows():
+        mat = xl_row['_mat']; lt = xl_row['_lt']
+        if not lt or lt == 'nan':
+            continue
+        tol = ROCE_TOL if lt in roce_types else (RATE_TOL if lt in rate_types else VOL_TOL)
+        py_rows = py_idx.get((mat, lt), [])
+        py_row  = py_rows[0] if py_rows else None
+        for xl_col, period in xl_pm:
+            ev  = _safe_float(xl_row[xl_col])
+            pv  = _safe_float(py_row[py_periods[period]]) \
+                  if (py_row is not None and period in py_periods) else 0.0
+            diff = abs(ev - pv)
+            records.append({
+                'sheet': sheet_label, 'line_type': lt, 'material': mat,
+                'period': period, 'xl_val': ev, 'py_val': pv,
+                'diff': diff, 'tol': tol, 'pass': diff <= tol, 'missing': py_row is None,
+            })
+    return records
+
+
+def _compare_starting_stock_records(py_df: pd.DataFrame, xl_df: pd.DataFrame,
+                                     sheet_label: str) -> list:
+    """Compare Starting Stock column (xl index 10) vs Python 'Starting stock'."""
+    xl_df = xl_df.copy(); py_df = py_df.copy()
+    xl_df['_mat'] = xl_df.iloc[:, 0].astype(str).str.strip()
+    xl_df['_lt']  = xl_df.iloc[:, 7].astype(str).str.strip()
+    py_df['_mat'] = py_df['Material number'].astype(str).str.strip()
+    py_df['_lt']  = py_df['Line type'].astype(str).str.strip()
+
+    xl_ss_col = xl_df.columns[10]
+    py_idx    = {(row['_mat'], row['_lt']): row for _, row in py_df.iterrows()}
+
+    records = []
+    for _, xl_row in xl_df.iterrows():
+        mat = xl_row['_mat']; lt = xl_row['_lt']
+        if not lt or lt == 'nan':
+            continue
+        ev     = _safe_float(xl_row[xl_ss_col])
+        py_row = py_idx.get((mat, lt))
+        pv_raw = py_row.get('Starting stock', None) if py_row is not None else None
+        pv     = _safe_float(pv_raw) if pv_raw is not None else 0.0
+        diff   = abs(ev - pv)
+        records.append({
+            'sheet': sheet_label, 'line_type': lt, 'material': mat,
+            'period': 'Starting stock', 'xl_val': ev, 'py_val': pv,
+            'diff': diff, 'tol': VOL_TOL, 'pass': diff <= VOL_TOL,
+            'missing': py_row is None,
+        })
+    return records
+
+
+def _compare_aux_records(py_df: pd.DataFrame, xl_df: pd.DataFrame,
+                          sheet_label: str) -> list:
+    """Compare AUX1 (xl col 8) and AUX2 (xl col 9) for all line types."""
+    xl_df = xl_df.copy(); py_df = py_df.copy()
+    xl_df['_mat'] = xl_df.iloc[:, 0].astype(str).str.strip()
+    xl_df['_lt']  = xl_df.iloc[:, 7].astype(str).str.strip()
+    py_df['_mat'] = py_df['Material number'].astype(str).str.strip()
+    py_df['_lt']  = py_df['Line type'].astype(str).str.strip()
+
+    xl_aux1 = xl_df.columns[8]
+    xl_aux2 = xl_df.columns[9]
+    py_idx  = {(row['_mat'], row['_lt']): row for _, row in py_df.iterrows()}
+
+    records = []
+    for _, xl_row in xl_df.iterrows():
+        mat = xl_row['_mat']; lt = xl_row['_lt']
+        if not lt or lt == 'nan':
+            continue
+        py_row = py_idx.get((mat, lt))
+        for xl_col, py_col_name, lbl in (
+            (xl_aux1, 'Aux Column',   'Aux1'),
+            (xl_aux2, 'Aux 2 Column', 'Aux2'),
+        ):
+            ev_raw = xl_row[xl_col]
+            pv_raw = py_row.get(py_col_name, None) if py_row is not None else None
+            # Numeric comparison where possible, else string equality
+            try:
+                ev = _safe_float(ev_raw); pv = _safe_float(pv_raw) if pv_raw is not None else 0.0
+                diff   = abs(ev - pv)
+                is_pass = diff <= VOL_TOL
+                xl_disp = ev; py_disp = pv
+            except (TypeError, ValueError):
+                ev_s = str(ev_raw).strip() if ev_raw is not None else ''
+                pv_s = str(pv_raw).strip() if pv_raw is not None else ''
+                diff   = 0.0 if ev_s == pv_s else 1.0
+                is_pass = ev_s == pv_s
+                xl_disp = ev_s; py_disp = pv_s
+            records.append({
+                'sheet': sheet_label, 'line_type': lt, 'material': mat,
+                'period': lbl, 'xl_val': xl_disp, 'py_val': py_disp,
+                'diff': diff, 'tol': VOL_TOL, 'pass': is_pass,
+                'missing': py_row is None,
+            })
+    return records
+
+
+def _write_validation_report(records_vol: list, records_val: list,
+                               records_ss_vol: list, records_ss_val: list,
+                               records_aux_vol: list, records_aux_val: list,
+                               output_path: str, label: str) -> str:
+    """Write validation_report.xlsx with Summary, Top-10, per-line-type, SS, and AUX sheets."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font
+
+    GREEN  = PatternFill('solid', fgColor='C8E6C9')
+    RED    = PatternFill('solid', fgColor='FFCDD2')
+    HEADER = PatternFill('solid', fgColor='263238')
+    WBOLD  = Font(bold=True, color='FFFFFF')
+    BOLD   = Font(bold=True)
+
+    wb  = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    def _hdr(ws, cols):
+        ws.append(cols)
+        for cell in ws[ws.max_row]:
+            cell.fill = HEADER; cell.font = WBOLD
+
+    def _set_widths(ws, widths):
+        from openpyxl.utils import get_column_letter
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    def _color_row(ws, is_pass):
+        fill = GREEN if is_pass else RED
+        for cell in ws[ws.max_row]:
+            cell.fill = fill
+
+    # ---- Summary ----
+    ws0 = wb.create_sheet('Summary')
+    ws0.append(['S&OP Validation Report', label])
+    ws0['A1'].font = Font(bold=True, size=14)
+    ws0.append([])
+    _hdr(ws0, ['Sheet', 'Line Type', 'Cells Compared', 'Matched', 'Mismatches', 'Match %', 'Status'])
+
+    all_records = records_vol + records_val + records_ss_vol + records_ss_val \
+                  + records_aux_vol + records_aux_val
+    summary_data: dict = {}
+    for r in all_records:
+        key = (r['sheet'], r['line_type'])
+        if key not in summary_data:
+            summary_data[key] = {'matched': 0, 'total': 0}
+        summary_data[key]['total'] += 1
+        if r['pass']:
+            summary_data[key]['matched'] += 1
+
+    grand_m = grand_t = 0
+    for (sheet, lt) in sorted(summary_data.keys()):
+        v   = summary_data[(sheet, lt)]
+        m, t = v['matched'], v['total']
+        pct  = round(100.0 * m / t, 1) if t else 0.0
+        status = 'PASS' if pct >= 90 else 'FAIL'
+        ws0.append([sheet, lt, t, m, t - m, pct, status])
+        _color_row(ws0, status == 'PASS')
+        grand_m += m; grand_t += t
+
+    gpct = round(100.0 * grand_m / grand_t, 1) if grand_t else 0.0
+    ws0.append([])
+    ws0.append(['OVERALL', '', grand_t, grand_m, grand_t - grand_m, gpct,
+                'PASS' if gpct >= 90 else 'FAIL'])
+    for cell in ws0[ws0.max_row]:
+        cell.font = BOLD
+    _set_widths(ws0, [22, 42, 15, 12, 14, 10, 8])
+
+    # ---- Top 10 Mismatches ----
+    ws1 = wb.create_sheet('Top 10 Mismatches')
+    _hdr(ws1, ['Sheet', 'Line Type', 'Material', 'Period / Column',
+               'Excel Value', 'Python Value', 'Abs Diff'])
+    top10 = sorted([r for r in all_records if not r['pass']],
+                   key=lambda r: r['diff'], reverse=True)[:10]
+    for r in top10:
+        ws1.append([r['sheet'], r['line_type'], r['material'], r['period'],
+                    r['xl_val'], r['py_val'], round(r['diff'], 4)])
+        _color_row(ws1, False)
+    _set_widths(ws1, [20, 42, 18, 16, 14, 14, 12])
+
+    # ---- Per-line-type sheets (volume) ----
+    def _lt_sheet(records, lt, prefix):
+        lt_recs = [r for r in records if r['line_type'] == lt]
+        if not lt_recs:
+            return
+        raw = (prefix + ' ' + lt).replace('/', '-').replace('\\', '-') \
+                                  .replace('*','').replace('?','').replace('[','') \
+                                  .replace(']','').replace(':','')
+        sname = raw[:31]
+        ws = wb.create_sheet(sname)
+        _hdr(ws, ['Material', 'Period', 'Excel Value', 'Python Value', 'Abs Diff', 'Pass'])
+        for r in lt_recs:
+            ws.append([r['material'], r['period'], r['xl_val'], r['py_val'],
+                       round(r['diff'], 4), 'PASS' if r['pass'] else 'FAIL'])
+            _color_row(ws, r['pass'])
+        _set_widths(ws, [18, 12, 14, 14, 12, 8])
+
+    for lt in sorted(set(r['line_type'] for r in records_vol)):
+        _lt_sheet(records_vol, lt, 'V')
+    for lt in sorted(set(r['line_type'] for r in records_val)):
+        _lt_sheet(records_val, lt, 'P')
+
+    # ---- Starting Stock sheet ----
+    ws_ss = wb.create_sheet('Starting Stock')
+    _hdr(ws_ss, ['Sheet', 'Line Type', 'Material', 'Excel Value', 'Python Value', 'Abs Diff', 'Pass'])
+    for r in records_ss_vol + records_ss_val:
+        ws_ss.append([r['sheet'], r['line_type'], r['material'],
+                      r['xl_val'], r['py_val'], round(r['diff'], 4),
+                      'PASS' if r['pass'] else 'FAIL'])
+        _color_row(ws_ss, r['pass'])
+    _set_widths(ws_ss, [20, 42, 18, 14, 14, 12, 8])
+
+    # ---- AUX Columns sheet ----
+    ws_ax = wb.create_sheet('AUX Columns')
+    _hdr(ws_ax, ['Sheet', 'Line Type', 'Material', 'Aux Col',
+                 'Excel Value', 'Python Value', 'Diff', 'Pass'])
+    for r in records_aux_vol + records_aux_val:
+        ws_ax.append([r['sheet'], r['line_type'], r['material'], r['period'],
+                      r['xl_val'], r['py_val'], round(r['diff'], 4),
+                      'PASS' if r['pass'] else 'FAIL'])
+        _color_row(ws_ax, r['pass'])
+    _set_widths(ws_ax, [20, 42, 18, 8, 18, 18, 12, 8])
+
+    wb.save(output_path)
+    print(f"\n  [REPORT] Saved → {output_path}  ({len(wb.sheetnames)} sheets)")
+    return output_path
+
+
 # ---- Main ----
 
 def validate_scenario(excel_file: str,
@@ -291,6 +541,30 @@ def validate_scenario(excel_file: str,
                               rate_types=set(), roce_types=roce_types)
     val_line, val_match, val_total = _print_results(val_res, f'VALUE PLANNING — {label}')
 
+    # 7. Collect raw comparison records for detailed report & top-10
+    print("\n[6] Building detailed comparison records...")
+    roce_types_set = {lt for lt in py_val_df.get('Line type', pd.Series()).unique()
+                      if 'ROCE' in str(lt).upper() or 'ROI' in str(lt).upper()}
+    raw_vol     = _build_comparison_records(py_vol_df, xl_vol_df, 'Volume Planning')
+    raw_val     = _build_comparison_records(py_val_df, xl_val_df, 'Value Planning',
+                                            rate_types=set(), roce_types=roce_types_set)
+    raw_ss_vol  = _compare_starting_stock_records(py_vol_df, xl_vol_df, 'Volume Planning')
+    raw_ss_val  = _compare_starting_stock_records(py_val_df, xl_val_df, 'Value Planning')
+    raw_aux_vol = _compare_aux_records(py_vol_df, xl_vol_df, 'Volume Planning')
+    raw_aux_val = _compare_aux_records(py_val_df, xl_val_df, 'Value Planning')
+
+    # 8. Starting Stock summary
+    ss_all = raw_ss_vol + raw_ss_val
+    ss_m   = sum(1 for r in ss_all if r['pass']);  ss_t = len(ss_all)
+    ss_pct = 100.0 * ss_m / ss_t if ss_t else 0.0
+    print(f"    Starting Stock: {ss_m}/{ss_t} ({ss_pct:.1f}%)")
+
+    # 9. AUX columns summary (all line types)
+    aux_all = raw_aux_vol + raw_aux_val
+    aux_m   = sum(1 for r in aux_all if r['pass']);  aux_t = len(aux_all)
+    aux_pct = 100.0 * aux_m / aux_t if aux_t else 0.0
+    print(f"    AUX Columns:    {aux_m}/{aux_t} ({aux_pct:.1f}%)")
+
     # 7. Combined summary
     grand_match = vol_match + val_match
     grand_total = vol_total + val_total
@@ -306,17 +580,53 @@ def validate_scenario(excel_file: str,
           f"({vol_pct:>5.1f}%)  {'PASS' if vol_pct >= 90 else 'FAIL'}")
     print(f"  Value  Planning:  {val_match:>7}/{val_total:<7}  "
           f"({val_pct:>5.1f}%)  {'PASS' if val_pct >= 90 else 'FAIL'}")
+    print(f"  Starting Stock:   {ss_m:>7}/{ss_t:<7}  "
+          f"({ss_pct:>5.1f}%)  {'PASS' if ss_pct >= 90 else 'FAIL'}")
+    print(f"  AUX Columns:      {aux_m:>7}/{aux_t:<7}  "
+          f"({aux_pct:>5.1f}%)  {'PASS' if aux_pct >= 90 else 'FAIL'}")
+    # Grand total across ALL comparison types
+    all_m = grand_match + ss_m + aux_m
+    all_t = grand_total + ss_t  + aux_t
+    all_pct = 100.0 * all_m / all_t if all_t else 0.0
     print(f"  {'─'*60}")
-    print(f"  COMBINED:         {grand_match:>7}/{grand_total:<7}  "
-          f"({grand_pct:>5.1f}%)  {'PASS' if grand_pct >= 90 else 'FAIL'}")
+    print(f"  COMBINED (all):   {all_m:>7}/{all_t:<7}  "
+          f"({all_pct:>5.1f}%)  {'PASS' if all_pct >= 90 else 'FAIL'}")
     print(f"{'='*W}")
+
+    # 10. Top 10 largest mismatches across period cells
+    all_period_recs = raw_vol + raw_val
+    mismatches = sorted([r for r in all_period_recs if not r['pass']],
+                        key=lambda r: r['diff'], reverse=True)
+    total_mismatches = len(mismatches)
+    total_period_cells = len(all_period_recs)
+    mismatch_pct = 100.0 * total_mismatches / total_period_cells if total_period_cells else 0.0
+    print(f"\n  Period cells compared : {total_period_cells:,}")
+    print(f"  Mismatches            : {total_mismatches:,}  ({mismatch_pct:.2f}%)")
+    if mismatches:
+        print(f"\n  TOP 10 LARGEST MISMATCHES (period data):")
+        print(f"  {'Sheet':<18} {'Line Type':<36} {'Material':<14} {'Period':<9} "
+              f"{'Excel':>12} {'Python':>12} {'Diff':>10}")
+        print(f"  {'-'*18} {'-'*36} {'-'*14} {'-'*9} {'-'*12} {'-'*12} {'-'*10}")
+        for r in mismatches[:10]:
+            print(f"  {r['sheet']:<18} {r['line_type']:<36} {r['material']:<14} "
+                  f"{r['period']:<9} {r['xl_val']:>12.4g} {r['py_val']:>12.4g} "
+                  f"{r['diff']:>10.4g}")
+    print(f"{'='*W}")
+
+    # 11. Write Excel report
+    report_path = str(Path(excel_file).parent / 'validation_report.xlsx')
+    _write_validation_report(raw_vol, raw_val, raw_ss_vol, raw_ss_val,
+                              raw_aux_vol, raw_aux_val, report_path, label)
 
     return {
         'label':    label,
         'volume':   {'matched': vol_match,   'total': vol_total,   'pct': vol_pct,   'by_line': vol_line},
         'value':    {'matched': val_match,   'total': val_total,   'pct': val_pct,   'by_line': val_line},
-        'aux':      aux_results,
+        'starting_stock': {'matched': ss_m,  'total': ss_t,  'pct': ss_pct},
+        'aux':      {'matched': aux_m,        'total': aux_t,  'pct': aux_pct},
         'combined': {'matched': grand_match, 'total': grand_total, 'pct': grand_pct},
+        'all':      {'matched': all_m,        'total': all_t,       'pct': all_pct},
+        'report_path': report_path,
     }
 
 
