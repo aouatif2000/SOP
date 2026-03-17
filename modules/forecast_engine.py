@@ -35,23 +35,13 @@ class ForecastEngine:
             all_values = [v for _, v in all_sorted]
             config_actuals = self.data.forecast_actuals_months
             start_idx = config_actuals + 1  # +1 gap column matches VBA
-
             self.results[mat_num] = {}
             for i, period in enumerate(self.periods):
-                if i < self.months_actuals:
-                    # Actuals period: use direct historical demand from forecast sheet actuals range.
-                    # Positional: all_values[0] = first actuals month, ..., all_values[months_actuals-1] = last.
-                    if i < len(all_values):
-                        self.results[mat_num][period] = all_values[i]
-                    else:
-                        self.results[mat_num][period] = 0.0
+                val_idx = start_idx + i
+                if val_idx < len(all_values):
+                    self.results[mat_num][period] = all_values[val_idx]
                 else:
-                    # Forecast period: positional mapping (start_idx skips actuals + VBA gap column).
-                    val_idx = start_idx + (i - self.months_actuals)
-                    if val_idx < len(all_values):
-                        self.results[mat_num][period] = all_values[val_idx]
-                    else:
-                        self.results[mat_num][period] = 0.0
+                    self.results[mat_num][period] = 0.0
 
             aux_1, aux_2 = self._calculate_aux_columns(mat_num, forecast_data)
 

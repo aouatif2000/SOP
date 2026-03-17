@@ -485,7 +485,7 @@ function updateHorizonDisplay() {
     }
 
     const fmt = d => d.toLocaleString('en-GB', { month: 'short', year: '2-digit' });
-    const total = actuals + forecast;
+    const total = forecast;
     const actualsText = actuals > 0 ? `${actuals} actuals, ` : '';
     horizonEl.textContent = `Planning from ${fmt(startDate)} to ${fmt(endDate)} — ${actualsText}${forecast} forecast (${total} months total)`;
     banner.classList.remove('hidden');

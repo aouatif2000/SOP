@@ -98,37 +98,39 @@ class PlanningEngine:
         #                                              ForecastEngine._calculate_aux_columns
 
         if self.planning_month:
-            try:
-                pm = datetime.strptime(self.planning_month, '%Y/%m')
-                # Shift the period window start back to the first actuals month.
-                # With months_actuals=12 and planning_month=Dec 2025 → start=Jan 2025.
-                # With months_actuals=0 or 1 → no shift (start remains at planning month).
-                shift = max(0, self.months_actuals - 1)
-                if shift > 0:
-                    total_m = pm.year * 12 + (pm.month - 1) - shift
-                    pm_start = datetime(total_m // 12, total_m % 12 + 1, 1)
-                else:
-                    pm_start = pm
-                self.data.config.initial_date = pm_start
-                print(f"  >> planning_month override: planning_month={pm.strftime('%Y-%m')}, "
-                      f"start={pm_start.strftime('%Y-%m')} (shifted back {shift} months)")
-            except ValueError:
+            # Copilot: VBA DefineVariables lines 3447-3449 anchor forecast columns
+            # from InitialDate + ForecastActualsMonths, so preserve Config anchors first.
+            _config_initial_date = self.data.config.initial_date
+            # Copilot: VBA DefineVariables lines 3447-3449 use ForecastActualsMonths
+            # to position ForecastStartClmn from ForecastActualStartClmn.
+            _original_actuals = self.data.forecast_actuals_months
+            _pm = None
+            for _fmt in ('%Y/%m', '%Y-%m'):
+                try:
+                    _pm = datetime.strptime(self.planning_month, _fmt)
+                    break
+                except ValueError:
+                    continue
+            if _pm is None:
                 print(f"  >> WARNING: Could not parse planning_month='{self.planning_month}' "
-                      f"(expected YYYY/MM) — using date from Excel Config sheet")
+                      f"(expected YYYY/MM or YYYY-MM) — using date from Excel Config sheet")
+            else:
+                _config_initial_date = self.data.config.initial_date
+                _original_actuals    = self.data.forecast_actuals_months
+                self.data.config.initial_date = _pm
+                _month_shift = (_pm.year  - _config_initial_date.year)  * 12 \
+                             + (_pm.month - _config_initial_date.month)
+                self.data.forecast_actuals_months = _original_actuals + _month_shift
+                print(f"  >> forecast_actuals_months updated: {_original_actuals} + {_month_shift} = {self.data.forecast_actuals_months}")
 
+        # Copilot: VBA DefineVariables line 3443 sets end column from ForecastMonths only:
+        # PlanningEndForecastClmn = PlanningStartForecastClmn + ForecastMonths - 1
         total_horizon = self.months_forecast
-        if self.months_actuals > 0:
-            total_horizon = self.months_actuals + self.months_forecast
         self.data.config.forecast_months = total_horizon
-        print(f"  >> horizon override: {total_horizon} periods ({self.months_actuals} actuals + {self.months_forecast} forecast)")
+        print(f"  >> horizon override: {total_horizon} forecast periods")
 
         # Regenerate periods once — after both start-date and length are finalised.
         self.data.periods = self.data.config.get_periods()
-
-        # months_actuals = 0 means "keep the Excel Config value" (existing convention).
-        if self.months_actuals > 0:
-            self.data.forecast_actuals_months = self.months_actuals
-            print(f"  >> months_actuals override: {self.months_actuals} actuals months")
 
         print(f"  >> Final horizon: {len(self.data.periods)} periods starting "
               f"{self.data.periods[0] if self.data.periods else 'N/A'}, "
@@ -137,7 +139,7 @@ class PlanningEngine:
         # ===== STEP 2: Demand Forecast (Line 01) =====
         print("\n[STEP 2] Calculating Demand Forecast (Line 01)...")
         # Use config values if not explicitly overridden
-        actuals_months = self.months_actuals if self.months_actuals > 0 else getattr(self.data, 'forecast_actuals_months', 12)
+        actuals_months = self.data.forecast_actuals_months
         forecast_months = self.months_forecast if self.months_forecast > 0 else self.data.config.forecast_months
         print(f"  >> USING: actuals_months={actuals_months} (input={self.months_actuals}), forecast_months={forecast_months} (input={self.months_forecast})")
         forecast_engine = ForecastEngine(self.data, actuals_months, forecast_months)
