@@ -512,10 +512,11 @@ class CapacityEngine:
         """Line 12: FTE Requirements per group + trucks + control room.
         Mill groups: FTE based on MAX-aggregated cap util (VBA MillGroupFormulas L12).
         Packaging/default groups: FTE based on SUM-aggregated cap util (VBA PackGroupFormulas L12).
+        FTE = cap_util_hours / (fte_hours_per_year / 12)
         """
         print("  [12] Calculating FTE Requirements...")
-        # VBA MillGroupFormulas/PackGroupFormulas: FTE = CapUtil * fte_coeff / Aux2
-        # where Aux2 = annual shift hours for the group (same value in shift availability row Aux2).
+        fte_hours_per_year = self.data.fte_hours_per_year  # e.g. 1492 hours/year per FTE
+        fte_monthly_hours = fte_hours_per_year / 12        # hours one FTE works per month
         for group_id in self.all_groups:
             hours = self.group_hours_aggregated.get(group_id, {p: 0.0 for p in self.periods})
             group = self.data.machine_groups.get(group_id)
@@ -527,13 +528,8 @@ class CapacityEngine:
                         machine_names.append(m.machine_code)
             mat = self.data.materials.get(group_id)
             fte_coeff = mat.fte_requirements if (mat and mat.fte_requirements > 0) else 1.0
-            # Use the group's own annual shift hours as denominator (mirrors VBA Aux2)
-            grp_monthly = self.group_monthly_shift_hours.get(group_id, 520.0)
-            annual_shift = grp_monthly * 12
-            aux2_str = (str(int(annual_shift))
-                        if annual_shift == int(annual_shift)
-                        else str(round(annual_shift, 2)))
-            fte_data = {p: hours[p] * fte_coeff / annual_shift if annual_shift > 0 else 0.0 for p in self.periods}
+            aux2_str = str(round(fte_hours_per_year, 2)) if fte_hours_per_year != int(fte_hours_per_year) else str(int(fte_hours_per_year))
+            fte_data = {p: hours[p] * fte_coeff / fte_monthly_hours if fte_monthly_hours > 0 else 0.0 for p in self.periods}
             self.rows_12.append(PlanningRow(
                 material_number=group_id,
                 material_name=';'.join(machine_names) if machine_names else '',
@@ -553,15 +549,13 @@ class CapacityEngine:
         truck_hours_cache = getattr(self, '_truck_hours_cache', {})
         if not truck_hours_cache:
             truck_hours_cache = self._compute_truck_hours()
-        truck_monthly_shift = self.shift_hours_lookup.get('3-shift system', 520.0)
-        truck_annual_shift = truck_monthly_shift * 12
-        aux2_str = (str(int(truck_annual_shift))
-                    if truck_annual_shift == int(truck_annual_shift)
-                    else str(round(truck_annual_shift, 2)))
+        fte_hours_per_year = self.data.fte_hours_per_year
+        fte_monthly_hours = fte_hours_per_year / 12
+        aux2_str = str(round(fte_hours_per_year, 2)) if fte_hours_per_year != int(fte_hours_per_year) else str(int(fte_hours_per_year))
         for truck_mat_id, hours in truck_hours_cache.items():
             tm = self.data.materials.get(truck_mat_id)
             fte_coeff = tm.fte_requirements if (tm and tm.fte_requirements > 0) else 1.0
-            fte_data = {p: hours[p] * fte_coeff / truck_annual_shift if truck_annual_shift > 0 else 0.0 for p in self.periods}
+            fte_data = {p: hours[p] * fte_coeff / fte_monthly_hours if fte_monthly_hours > 0 else 0.0 for p in self.periods}
             self.rows_12.append(PlanningRow(
                 material_number=truck_mat_id, material_name=tm.name if tm else '',
                 product_type='Machine Group', product_family='',
@@ -571,16 +565,14 @@ class CapacityEngine:
             ))
 
     def _calculate_control_room_fte(self):
-        # VBA ControlRoomFormulas FTE: cap_util_monthly * fte_coeff / annual_shift_hours
-        # = (shift_hours) * fte_coeff / (shift_hours * 12) = fte_coeff / 12 per month
+        # VBA ControlRoomFormulas FTE: cap_util_monthly * fte_coeff / (fte_hours_per_year / 12)
         shift_hours = self.shift_hours_lookup.get('3-shift system', 520.0)
-        annual_shift = shift_hours * 12
-        aux2_str = (str(int(annual_shift))
-                    if annual_shift == int(annual_shift)
-                    else str(round(annual_shift, 2)))
+        fte_hours_per_year = self.data.fte_hours_per_year
+        fte_monthly_hours = fte_hours_per_year / 12
+        aux2_str = str(round(fte_hours_per_year, 2)) if fte_hours_per_year != int(fte_hours_per_year) else str(int(fte_hours_per_year))
         mat = self.data.materials.get('ZZZZZ_CONTROLROOM')
         fte_coeff = mat.fte_requirements if (mat and mat.fte_requirements > 0) else 1.0
-        fte_val = shift_hours * fte_coeff / annual_shift if annual_shift > 0 else 0.0
+        fte_val = shift_hours * fte_coeff / fte_monthly_hours if fte_monthly_hours > 0 else 0.0
         self.rows_12.append(PlanningRow(
             material_number='ZZZZZ_CONTROLROOM',
             material_name='Control room operators',

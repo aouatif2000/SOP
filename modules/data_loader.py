@@ -31,6 +31,7 @@ class DataLoader:
         self.machines: Dict[str, Machine] = {}
         self.machine_groups: Dict[str, MachineGroup] = {}
         self.forecasts: Dict[str, Dict[str, float]] = {}
+        self.forecast_first_period: Optional[str] = None  # earliest period key in Forecast sheet
         self.stock_levels: Dict[str, float] = {}
         self.stock: Dict[str, Dict[str, float]] = {}  # NEW: includes both qty and value
         self.safety_stock: Dict[str, SafetyStockConfig] = {}
@@ -297,6 +298,9 @@ class DataLoader:
                     period_columns.append((col, ps))
                 except:
                     pass
+        # Record first period in the Forecast sheet for positional anchoring in ForecastEngine
+        if period_columns:
+            self.forecast_first_period = period_columns[0][1]
         for _, row in df.iterrows():
             mn = str(row.get('Material number', '')).strip()
             if not mn or mn == 'nan':

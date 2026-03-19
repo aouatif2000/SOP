@@ -31,16 +31,12 @@ class ForecastEngine:
             # VBA DemandForecast: copies Forecast sheet column ForecastStartClmn+i
             # (where ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1)
             # to Planning column PlanningStartForecast+i.
-            # This is POSITIONAL, not key-based. sorted_forecast[anchor + i] is the
-            # value for planning period i, regardless of that column's date label.
-            # anchor = months_actuals + 1 (same +1 used for Aux2 / starting_stock).
-            aux_1, aux_2, all_sorted = self._calculate_aux_columns(mat_num, forecast_data)
+            # We use key-based lookup anchored to the first period in the Forecast sheet
+            # so every material is positioned correctly regardless of how many historical
+            # columns it happens to have populated.
+            aux_1, aux_2, ordered_vals = self._calculate_aux_columns(mat_num, forecast_data)
 
-            anchor = self.months_actuals + 1
-            self.results[mat_num] = {}
-            for i, period in enumerate(self.periods):
-                idx = anchor + i
-                self.results[mat_num][period] = all_sorted[idx][1] if idx < len(all_sorted) else 0.0
+            self.results[mat_num] = {period: val for period, val in ordered_vals}
 
             row = PlanningRow(
                 material_number=mat_num,
@@ -61,34 +57,66 @@ class ForecastEngine:
         print(f"       -> {len(self.rows)} materials with forecast")
         return self.rows
 
+    @staticmethod
+    def _offset_period(base_period: str, offset: int) -> str:
+        """Return YYYY-MM for base_period + offset months."""
+        year, month = int(base_period[:4]), int(base_period[5:7])
+        total = year * 12 + (month - 1) + offset
+        y = total // 12
+        m = (total % 12) + 1
+        return f"{y}-{str(m).zfill(2)}"
+
     def _calculate_aux_columns(self, mat_num: str, forecast_data: Dict[str, float]) -> tuple:
         """
-        All positional values derived from sorted forecast columns (left→right order):
+        Key-based lookup anchored to data.forecast_first_period:
 
-        AUX1       = AVERAGE of positions 0..months_actuals-1
-        AUX2       = AVERAGE of positions anchor..anchor+months_forecast-1
-                     where anchor = months_actuals + 1  (VBA's +1 gap-skip offset)
-        all_sorted = returned so caller can reuse for positional monthly value fill
+        first_col_period = forecast_first_period  (e.g. "2024-11")
+        aux2_anchor      = first_col_period + (months_actuals + 1) months  (e.g. "2025-12")
+
+        AUX1  = AVERAGE of months_actuals periods starting from first_col_period
+                ("2024-11".."2025-10")
+        AUX2  = AVERAGE of months_forecast periods starting from aux2_anchor
+                ("2025-12".."2026-11")
+        vals  = list of (period, value) for each planning period i,
+                where value = forecast_data[aux2_anchor + i months]
+                i=0 → "2025-12" = 536 for 600010662 → planning column "2026-01" ✓
         """
         if not self.periods:
             return "0", "0", []
 
-        all_sorted_aux = sorted(forecast_data.items())
-        all_values_aux = [v for _, v in all_sorted_aux]
+        first = getattr(self.data, 'forecast_first_period', None)
+        if not first:
+            # Fallback: derive from sorted keys
+            sorted_keys = sorted(forecast_data.keys())
+            first = sorted_keys[0] if sorted_keys else None
+        if not first:
+            return "0", "0", [(p, 0.0) for p in self.periods]
 
-        # AUX1: positional average of first months_actuals entries (leftmost date columns).
-        if self.months_actuals > 0 and all_values_aux:
-            actuals_pool = all_values_aux[:self.months_actuals]
-            aux_1 = round(sum(actuals_pool) / len(actuals_pool)) if actuals_pool else 0
-        else:
-            aux_1 = 0
+        # AUX1: average of months_actuals periods starting from first_col_period
+        aux1_values = [
+            forecast_data.get(self._offset_period(first, i), 0.0)
+            for i in range(self.months_actuals)
+        ]
+        aux_1 = round(sum(aux1_values) / len(aux1_values)) if aux1_values else 0
 
-        # anchor = months_actuals + 1 (VBA's PlanningStartForecastClmn offset)
-        anchor = self.months_actuals + 1
-        aux2_pool = all_values_aux[anchor : anchor + self.months_forecast]
-        aux_2 = round(sum(aux2_pool) / len(aux2_pool)) if aux2_pool else 0
+        # AUX2: average of months_forecast periods starting from aux2_anchor (months_actuals+1)
+        # This is the Config initial_date period onward (e.g. "2025-12".."2026-11")
+        aux2_anchor = self._offset_period(first, self.months_actuals + 1)
+        aux2_values = [
+            forecast_data.get(self._offset_period(aux2_anchor, i), 0.0)
+            for i in range(self.months_forecast)
+        ]
+        aux_2 = round(sum(aux2_values) / len(aux2_values)) if aux2_values else 0
 
-        return str(aux_1), str(aux_2), all_sorted_aux
+        # Monthly values: planning period i → forecast_data[aux2_anchor + i]
+        # aux2_anchor = offset("2024-11", 13) = "2025-12" → sorted[13]
+        # So planning "2026-01" (i=0) = forecast_data["2025-12"] = 536 ✓ (matches Excel)
+        ordered_vals = [
+            (period, forecast_data.get(self._offset_period(aux2_anchor, i), 0.0))
+            for i, period in enumerate(self.periods)
+        ]
+
+        return str(aux_1), str(aux_2), ordered_vals
 
     def get_forecast(self, material: str, period: str) -> float:
         return self.results.get(material, {}).get(period, 0.0)
