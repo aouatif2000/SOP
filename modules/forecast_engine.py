@@ -34,7 +34,7 @@ class ForecastEngine:
             # This is POSITIONAL, not key-based. sorted_forecast[anchor + i] is the
             # value for planning period i, regardless of that column's date label.
             # anchor = months_actuals + 1 (same +1 used for Aux2 / starting_stock).
-            aux_1, aux_2, starting_stock, all_sorted = self._calculate_aux_columns(mat_num, forecast_data)
+            aux_1, aux_2, all_sorted = self._calculate_aux_columns(mat_num, forecast_data)
 
             anchor = self.months_actuals + 1
             self.results[mat_num] = {}
@@ -53,7 +53,7 @@ class ForecastEngine:
                 line_type=LineType.DEMAND_FORECAST.value,
                 aux_column=aux_1,
                 aux_2_column=aux_2,
-                starting_stock=starting_stock,
+                # starting_stock intentionally omitted: VBA leaves it blank for Line 01
                 values=self.results[mat_num].copy()
             )
             self.rows.append(row)
@@ -65,13 +65,13 @@ class ForecastEngine:
         """
         All positional values derived from sorted forecast columns (left→right order):
 
-        AUX1          = AVERAGE of positions 0..months_actuals-1
-        Starting stock = value at position months_actuals+1  (anchor, same as Aux2 start)
-        AUX2          = AVERAGE of positions anchor..anchor+months_forecast-1
-        all_sorted    = returned so caller can reuse for monthly value fill
+        AUX1       = AVERAGE of positions 0..months_actuals-1
+        AUX2       = AVERAGE of positions anchor..anchor+months_forecast-1
+                     where anchor = months_actuals + 1  (VBA's +1 gap-skip offset)
+        all_sorted = returned so caller can reuse for positional monthly value fill
         """
         if not self.periods:
-            return "0", "0", 0.0, []
+            return "0", "0", []
 
         all_sorted_aux = sorted(forecast_data.items())
         all_values_aux = [v for _, v in all_sorted_aux]
@@ -85,11 +85,10 @@ class ForecastEngine:
 
         # anchor = months_actuals + 1 (VBA's PlanningStartForecastClmn offset)
         anchor = self.months_actuals + 1
-        starting_stock = all_values_aux[anchor] if anchor < len(all_values_aux) else 0.0
         aux2_pool = all_values_aux[anchor : anchor + self.months_forecast]
         aux_2 = round(sum(aux2_pool) / len(aux2_pool)) if aux2_pool else 0
 
-        return str(aux_1), str(aux_2), starting_stock, all_sorted_aux
+        return str(aux_1), str(aux_2), all_sorted_aux
 
     def get_forecast(self, material: str, period: str) -> float:
         return self.results.get(material, {}).get(period, 0.0)
