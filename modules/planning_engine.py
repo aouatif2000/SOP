@@ -97,6 +97,7 @@ class PlanningEngine:
         # months_actuals  → data.forecast_actuals_months → Aux2 start index in
         #                                              ForecastEngine._calculate_aux_columns
 
+        _original_actuals = self.data.forecast_actuals_months
         if self.planning_month:
             # Copilot: VBA DefineVariables lines 3447-3449 anchor forecast columns
             # from InitialDate + ForecastActualsMonths, so preserve Config anchors first.
@@ -139,7 +140,7 @@ class PlanningEngine:
         # ===== STEP 2: Demand Forecast (Line 01) =====
         print("\n[STEP 2] Calculating Demand Forecast (Line 01)...")
         # Use config values if not explicitly overridden
-        actuals_months = self.data.forecast_actuals_months
+        actuals_months = _original_actuals
         forecast_months = self.months_forecast if self.months_forecast > 0 else self.data.config.forecast_months
         print(f"  >> USING: actuals_months={actuals_months} (input={self.months_actuals}), forecast_months={forecast_months} (input={self.months_forecast})")
         forecast_engine = ForecastEngine(self.data, actuals_months, forecast_months)
@@ -290,10 +291,16 @@ class PlanningEngine:
                 print(f"[NLI1] Exception 2 applied: B15 production adjusted by B4010 contribution.")
 
         print("\n[STEP 5] Calculating capacity...")
-        # Truck hours use '01. Demand forecast' volumes (VBA TruckOperationsFormulas SUMIFS)
-        l01_rows = self.results.get('01. Demand forecast', [])
-        l01_forecasts = {r.material_number: r.values for r in l01_rows}
-        capacity_engine = CapacityEngine(self.data, self.all_production_plans, l01_forecasts)
+        # Build per-line-type lookup: {line_type: {mat_num: {period: value}}}
+        # VBA TruckOperationsFormulas SUMIFS references the truck row's own col C
+        # (product_type_raw) as the line-type filter and col B (material_name) as
+        # the product-type filter — so CapacityEngine needs all line-type data.
+        all_line_data = {
+            lt: {r.material_number: r.values for r in rows}
+            for lt, rows in self.results.items()
+            if rows
+        }
+        capacity_engine = CapacityEngine(self.data, self.all_production_plans, all_line_data)
         capacity_results = capacity_engine.calculate()
         for line_type, rows in capacity_results.items():
             self.results[line_type] = rows
@@ -392,19 +399,20 @@ class PlanningEngine:
                 rows_data.append(row_dict)
         df = pd.DataFrame(rows_data)
         # VBA SortPlanningSheet (line 4811): sort by material number ASC, line type ASC, aux1 ASC, aux2 ASC
+        def _sort_key(col):
+            if col.name in ('Aux Column', 'Aux 2 Column'):
+                return pd.to_numeric(col, errors='coerce').fillna(
+                    col.rank(method='dense', na_option='bottom'))
+            if col.name == 'Material number':
+                return col.astype(str)
+            return col
+
         if not df.empty:
             df = df.sort_values(
                 by=['Material number', 'Line type', 'Aux Column', 'Aux 2 Column'],
                 ascending=[True, True, True, True],
                 na_position='last',
-                key=lambda col: col.astype(str) if col.name in ['Material number', 'Aux Column', 'Aux 2 Column'] else col
-            ).reset_index(drop=True)
-        # VBA DeleteDoubleProcessRowsPackagedMaterials (line 1757): keep first occurrence of each
-        # (material_number, line_type, aux1, aux2) combination — sort above determines which is "first"
-        if not df.empty:
-            df = df.drop_duplicates(
-                subset=['Material number', 'Line type', 'Aux Column', 'Aux 2 Column'],
-                keep='first'
+                key=_sort_key,
             ).reset_index(drop=True)
         return df
 

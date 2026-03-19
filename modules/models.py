@@ -89,6 +89,10 @@ class Material:
     control_room: int = 0
     default_inventory_value: float = 0.0
     is_active: bool = True
+    # Raw product-type string from Material Master (before enum conversion).
+    # For truck/control-room materials VBA puts a line-type name here (e.g.
+    # "01. Demand forecast") to tell TruckOperationsFormulas which line to SUMIFS over.
+    product_type_raw: str = ''
     
     @property
     def is_purchased(self) -> bool:

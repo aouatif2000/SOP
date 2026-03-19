@@ -28,20 +28,17 @@ class ForecastEngine:
             if not material:
                 continue  # Skip materials not in material master
 
-            # VBA DemandForecast (line 868): positional copy from ForecastStartClmn
-            # ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
-            # The +1 is a gap column VBA always skips between actuals and forecast.
-            all_sorted = sorted(forecast_data.items())
-            all_values = [v for _, v in all_sorted]
-            config_actuals = self.data.forecast_actuals_months
-            start_idx = config_actuals + 1  # +1 gap column matches VBA
+            # VBA DemandForecast: copies Forecast sheet column ForecastStartClmn+i
+            # to Planning column PlanningStartForecast+i.
+            # VBA uses positional +1 to skip the gap column that sits between actuals
+            # and forecast in the Excel sheet.  Python's _load_forecasts already
+            # excludes that gap column (it only reads date-formatted columns), so the
+            # gap is absent from forecast_data entirely.  Using a direct period key
+            # lookup is therefore equivalent to what VBA does — no positional offset
+            # needed — and is also robust to any planning-month shift.
             self.results[mat_num] = {}
-            for i, period in enumerate(self.periods):
-                val_idx = start_idx + i
-                if val_idx < len(all_values):
-                    self.results[mat_num][period] = all_values[val_idx]
-                else:
-                    self.results[mat_num][period] = 0.0
+            for period in self.periods:
+                self.results[mat_num][period] = forecast_data.get(period, 0.0)
 
             aux_1, aux_2 = self._calculate_aux_columns(mat_num, forecast_data)
 
@@ -65,40 +62,32 @@ class ForecastEngine:
 
     def _calculate_aux_columns(self, mat_num: str, forecast_data: Dict[str, float]) -> tuple:
         """
-        VBA Logic (from PDF):
-        AUX1 = IFERROR(AVERAGE(ForecastActualStart : ForecastActualStart + ForecastActualsMonths - 1), 0)
-             -> AVERAGE of the actuals range from the forecast sheet
-             -> AVERAGE ignores blanks, averages over months_actuals cells
-        AUX2 = IFERROR(AVERAGE(PlanningStartForecast : PlanningEndForecast), 0)
-             -> AVERAGE of the forecast values in the planning period columns
+        VBA Logic:
+        AUX1 = AVERAGE of the first ForecastActualsMonths columns in the Forecast sheet,
+               starting from column ForecastActualStartClmn (position 0 of date columns).
+               This is purely positional — VBA takes the first N date-valued columns
+               regardless of their period labels.
+        AUX2 = AVERAGE of the planning-period forecast values placed in the planning
+               sheet (PlanningStartForecast : PlanningEndForecast), i.e. one value
+               per period in self.periods.
         """
-        first_planning_period = min(self.periods) if self.periods else None
-        if not first_planning_period:
+        if not self.periods:
             return "0", "0"
 
-        # VBA AUX1 (line 874): AVERAGE(ForecastActualStartClmn : ForecastActualStartClmn + ForecastActualsMonths - 1)
-        # = positional average of the first months_actuals values in the Forecast sheet
+        # AUX1: positional average of first months_actuals entries in Forecast sheet.
+        # Actuals always occupy the earliest (leftmost) date columns; sorting by key
+        # reproduces the left-to-right column order.
         all_sorted_aux = sorted(forecast_data.items())
         all_values_aux = [v for _, v in all_sorted_aux]
-
         if self.months_actuals > 0 and all_values_aux:
             actuals_pool = all_values_aux[:self.months_actuals]
             aux_1 = round(sum(actuals_pool) / len(actuals_pool)) if actuals_pool else 0
         else:
             aux_1 = 0
 
-        # Aux 2: AVERAGE of ForecastMonths values starting at config_actuals + 1
-        # VBA: ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
-        #      AUX2 = AVERAGE(ForecastStartClmn : ForecastStartClmn + ForecastMonths - 1)
-        config_actuals = self.data.forecast_actuals_months
-        start_idx = config_actuals + 1   # +1 gap column VBA always skips
-        end_idx = start_idx + self.months_forecast
-        all_sorted = sorted(forecast_data.items())
-        all_values = [v for _, v in all_sorted]
-        start_idx = min(start_idx, len(all_values))
-        end_idx = min(end_idx, len(all_values))
-        pool = all_values[start_idx:end_idx]
-        aux_2 = round(sum(pool) / len(pool)) if pool else 0
+        # AUX2: average of the values placed in the planning columns (self.periods).
+        planning_pool = [forecast_data.get(p, 0.0) for p in self.periods]
+        aux_2 = round(sum(planning_pool) / len(planning_pool)) if planning_pool else 0
 
         return str(aux_1), str(aux_2)
 

@@ -75,10 +75,9 @@ class InventoryEngine:
             target_value = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
 
         # Aux2 = IFERROR( Aux1 / AVERAGE(Line03 across forecast columns only), 0 )
-        # VBA uses only the forecast portion of the planning window (excluding actuals months).
-        actuals_count = getattr(self.data, 'forecast_actuals_months', 0)
-        forecast_periods = self.periods[actuals_count:]
-        forecast_demand_values = [total_demand.get(p, 0.0) for p in forecast_periods] if forecast_periods else []
+        # VBA uses the full planning horizon (PlanningStartForecastClmn : PlanningEndForecastClmn).
+        forecast_periods = self.periods
+        forecast_demand_values = [total_demand.get(p, 0.0) for p in forecast_periods]
         avg_forecast_demand = sum(forecast_demand_values) / len(forecast_demand_values) if forecast_demand_values else 0.0
         coverage = round(target_value / avg_forecast_demand, 1) if avg_forecast_demand > 0 else 0.0
         # Append '!' as a warning flag when coverage exceeds 6 months (VBA: light red RGB 255,199,206)
@@ -177,15 +176,40 @@ class InventoryEngine:
                 else:
                     break  # heuristic values kept for remaining months
 
-            # Recalculate inventory balance after overlaying actuals
-            running_stock = initial_stock
-            for period in self.periods:
-                demand = total_demand.get(period, 0.0)
-                prod = production_plan.get(period, 0.0) if production_plan else 0.0
-                purch = purchase_receipt.get(period, 0.0)
-                running_stock = running_stock - demand + prod + purch
-                # Update production_plan running stock tracking is implicit;
-                # the inventory row recalculation below will use corrected values.
+            # Re-run production plan heuristic for months at and after the frozen
+            # period, using the corrected running_stock from actuals.
+            if is_purchased_and_produced and production_plan is not None:
+                running_stock = initial_stock
+                # Advance running_stock through frozen months using actual purchases
+                for i, period in enumerate(self.periods):
+                    if i >= lead_time:
+                        break
+                    demand  = total_demand.get(period, 0.0)
+                    prod    = production_plan.get(period, 0.0)
+                    purch   = purchase_receipt.get(period, 0.0)   # now = actuals
+                    running_stock = running_stock - demand + prod + purch
+
+                # Recalculate production plan from lead_time onwards
+                for i, period in enumerate(self.periods):
+                    if i < lead_time:
+                        continue
+                    demand    = total_demand.get(period, 0.0)
+                    raw_need  = target_value - running_stock + demand
+                    prod_qty  = 0.0
+                    purch_qty = 0.0
+                    if raw_need > 0:
+                        prod_need = raw_need * production_fraction_config
+                        if prod_need > 0:
+                            prod_qty = ceiling_multiple(prod_need, bom_header_qty)
+                        purch_need = raw_need - prod_qty
+                        if purch_need > 0 and i > lead_time:
+                            purch_qty = ceiling_multiple(
+                                purch_need, self.data.get_purchase_moq(mat_num))
+                    production_plan[period] = prod_qty
+                    if i > lead_time:
+                        purchase_receipt[period] = purch_qty
+                    running_stock = running_stock - demand + prod_qty + \
+                        purchase_receipt.get(period, 0.0)
 
         # === Create Line 06 rows ===
         if production_plan is not None:
@@ -231,7 +255,7 @@ class InventoryEngine:
                 else:
                     purchase_plan[period] = 0.0
 
-            pp_aux = "False" if lead_time == 0 else str(lead_time)
+            pp_aux = str(lead_time)
             rows.append(self._make_row(
                 mat_num, material, LineType.PURCHASE_PLAN.value,
                 aux_column=pp_aux, values=purchase_plan,

@@ -131,7 +131,11 @@ def upload_file():
         loader.load_all()
 
         site = getattr(loader.config, 'site', '') or ''
-        planning_month = getattr(loader.config, 'planning_month', '') or ''
+        # Derive planning_month from Config initial_date (YYYY-MM format for <input type="month">)
+        _idate = getattr(loader.config, 'initial_date', None)
+        planning_month = _idate.strftime('%Y-%m') if _idate else ''
+        months_actuals = getattr(loader, 'forecast_actuals_months', 12)
+        months_forecast = getattr(loader.config, 'forecast_months', 12)
 
         session_id = str(_uuid.uuid4())
         sessions[session_id] = {
@@ -147,7 +151,7 @@ def upload_file():
                 'machines': len(loader.machines),
                 'periods': len(loader.periods),
                 'site': site,
-                'planning_month': str(planning_month),
+                'planning_month': planning_month,
             },
             'uploaded_at': datetime.now().isoformat(),
         }
@@ -160,6 +164,9 @@ def upload_file():
             'success': True,
             'session_id': session_id,
             'filename': file.filename,
+            'planning_month': planning_month,
+            'months_actuals': months_actuals,
+            'months_forecast': months_forecast,
             'summary': {
                 'materials': len(loader.materials),
                 'bom_items': len(loader.bom),

@@ -19,11 +19,17 @@ from modules.data_loader import DataLoader
 
 
 class CapacityEngine:
-    def __init__(self, data: DataLoader, production_plan: Dict[str, Dict[str, float]], demand_forecasts: Dict[str, Dict[str, float]] = None):
+    def __init__(self, data: DataLoader, production_plan: Dict[str, Dict[str, float]],
+                 all_line_data: Dict[str, Dict[str, Dict[str, float]]] = None):
         self.data = data
         self.periods = data.periods
         self.production_plan = production_plan
-        self.demand_forecasts = demand_forecasts or {}
+        # all_line_data: {line_type: {mat_num: {period: value}}}
+        # Replaces the old demand_forecasts parameter; contains every line type so
+        # _calculate_truck_cap_util can pick the right source via product_type_raw.
+        self.all_line_data: Dict[str, Dict[str, Dict[str, float]]] = all_line_data or {}
+        # Convenience alias kept for any legacy callers
+        self.demand_forecasts = self.all_line_data.get(LineType.DEMAND_FORECAST.value, {})
 
         self.shift_hours_lookup: Dict[str, float] = data.shift_hours
         self.machine_hours_used: Dict[str, Dict[str, float]] = {}
@@ -32,6 +38,8 @@ class CapacityEngine:
         self.rows_10: List[PlanningRow] = []
         self.rows_11: List[PlanningRow] = []
         self.rows_12: List[PlanningRow] = []
+        # Per-group monthly shift hours, populated by _calculate_shift_availability
+        self.group_monthly_shift_hours: Dict[str, float] = {}
 
         # All groups from material master (including empty ones)
         self.all_groups: List[str] = []
@@ -48,11 +56,13 @@ class CapacityEngine:
 
     def calculate(self) -> Dict[str, List[PlanningRow]]:
         self._calculate_capacity_utilization()
+        # Apply site-specific exceptions BEFORE utilization rate so that
+        # Line 10 (utilization rate) uses the corrected cap-util hours.
+        self._apply_site_exceptions()
         self._calculate_shift_availability()
         self._calculate_available_capacity()
         self._calculate_utilization_rate()
         self._calculate_fte_requirements()
-        self._apply_site_exceptions()
 
         return {
             LineType.CAPACITY_UTILIZATION.value: self.rows_07_cap,
@@ -270,7 +280,7 @@ class CapacityEngine:
                     ]
                     grouped_values[p] = sum(comp_hours) / len(comp_hours) if comp_hours else 0.0
                 self.rows_07_cap.append(PlanningRow(
-                    material_number=compound_name,
+                    material_number=mat_num,
                     material_name=compound_name,
                     product_type='Machine', product_family=group or '',
                     spc_product='', product_cluster='', product_name=compound_name,
@@ -324,36 +334,60 @@ class CapacityEngine:
 
         print(f"       -> {len(self.rows_07_cap)} capacity utilization rows")
 
-    def _calculate_truck_cap_util(self):
-        truck_hours = {}
-        for mat_num, plan_data in self.demand_forecasts.items():
-            material = self.data.materials.get(mat_num)
-            if not material:
-                continue
-            truck_mat = None
-            if material.product_type.value == 'Bulk Product':
-                truck_mat = 'ZZZZ_TRUCK01'
-            elif material.product_type.value == 'Packaged Product':
-                truck_mat = 'ZZZZ_TRUCK02'
-            if not truck_mat:
-                continue
-            truck_material = self.data.materials.get(truck_mat)
-            if not truck_material or not truck_material.ton_per_truck or truck_material.ton_per_truck <= 0:
-                continue
-            if truck_mat not in truck_hours:
-                truck_hours[truck_mat] = {p: 0.0 for p in self.periods}
-            for period in self.periods:
-                qty = plan_data.get(period, 0.0)
-                if qty > 0:
-                    trucks = qty / truck_material.ton_per_truck
-                    hours = trucks * (truck_material.time_per_truck or 0)
-                    truck_hours[truck_mat][period] += hours
+    def _compute_truck_hours(self) -> Dict[str, Dict[str, float]]:
+        """VBA TruckOperationsFormulas — data-driven truck-hour calculation.
 
-        for truck_mat, hours in truck_hours.items():
-            tm = self.data.materials.get(truck_mat)
+        The VBA formula is:
+          SUMIFS(values[rows 2..ProdLineFirstRow-1],
+                 col_C_range,       truck_col_B,   <- product_type of material rows == truck material_name
+                 lineType_range,    truck_col_C)   <- line_type of material rows  == truck product_type_raw
+          * Aux1 / Aux2
+
+        Python equivalent:
+          - truck col B = tm.name          (e.g. "Bulk Product")
+          - truck col C = tm.product_type_raw (e.g. "01. Demand forecast")
+          - source rows  = all_line_data[product_type_raw]
+          - filtered by  material.product_type.value == tm.name
+        """
+        truck_hours: Dict[str, Dict[str, float]] = {}
+        for truck_mat_id, tm in self.data.materials.items():
+            if not tm.ton_per_truck or tm.ton_per_truck <= 0:
+                continue
+            if not tm.time_per_truck:
+                continue
+
+            # product_type filter: truck's Material Name (col B on planning sheet)
+            product_type_filter = tm.name
+            # line_type  filter: truck's raw product-type string (col C on planning sheet)
+            line_type_filter = tm.product_type_raw
+
+            source_data = self.all_line_data.get(line_type_filter)
+            if not source_data:
+                # Fallback: if the truck's product_type_raw doesn't match any line
+                # type (e.g. still blank / "Other"), use Line 01 demand forecast.
+                source_data = self.all_line_data.get(LineType.DEMAND_FORECAST.value, {})
+
+            truck_hours[truck_mat_id] = {p: 0.0 for p in self.periods}
+            for mat_num, plan_data in source_data.items():
+                material = self.data.materials.get(mat_num)
+                if not material:
+                    continue
+                if material.product_type.value != product_type_filter:
+                    continue
+                for period in self.periods:
+                    qty = plan_data.get(period, 0.0)
+                    if qty > 0:
+                        truck_hours[truck_mat_id][period] += (qty / tm.ton_per_truck) * tm.time_per_truck
+
+        return truck_hours
+
+    def _calculate_truck_cap_util(self):
+        self._truck_hours_cache = self._compute_truck_hours()
+        for truck_mat_id, hours in self._truck_hours_cache.items():
+            tm = self.data.materials.get(truck_mat_id)
             if tm:
                 self.rows_07_cap.append(PlanningRow(
-                    material_number=truck_mat, material_name=tm.name,
+                    material_number=truck_mat_id, material_name=tm.name,
                     product_type='Machine Group', product_family='',
                     spc_product='', product_cluster='', product_name='',
                     line_type=LineType.CAPACITY_UTILIZATION.value,
@@ -395,6 +429,11 @@ class CapacityEngine:
                             grp_shift_hours = self._get_shift_hours_for_machine(mc)
                             grp_shift_name = self._get_shift_system_name(mc)
                             break
+            annual_hours = grp_shift_hours * 12
+            self.group_monthly_shift_hours[group_id] = grp_shift_hours
+            aux2_str = (str(int(annual_hours))
+                        if annual_hours == int(annual_hours)
+                        else str(round(annual_hours, 2)))
             self.rows_11.append(PlanningRow(
                 material_number=group_id,
                 material_name=';'.join(machine_names) if machine_names else '',
@@ -402,6 +441,7 @@ class CapacityEngine:
                 spc_product='', product_cluster='', product_name='',
                 line_type=LineType.SHIFT_AVAILABILITY.value,
                 aux_column=grp_shift_name,
+                aux_2_column=aux2_str,
                 values={p: grp_shift_hours for p in self.periods}
             ))
         print(f"       -> {len(self.rows_11)} shift availability rows")
@@ -474,8 +514,8 @@ class CapacityEngine:
         Packaging/default groups: FTE based on SUM-aggregated cap util (VBA PackGroupFormulas L12).
         """
         print("  [12] Calculating FTE Requirements...")
-        fte_per_month = self.data.fte_hours_per_year / 12
-
+        # VBA MillGroupFormulas/PackGroupFormulas: FTE = CapUtil * fte_coeff / Aux2
+        # where Aux2 = annual shift hours for the group (same value in shift availability row Aux2).
         for group_id in self.all_groups:
             hours = self.group_hours_aggregated.get(group_id, {p: 0.0 for p in self.periods})
             group = self.data.machine_groups.get(group_id)
@@ -485,63 +525,67 @@ class CapacityEngine:
                     m = self.data.machines.get(mc)
                     if m:
                         machine_names.append(m.machine_code)
-            fte_data = {p: hours[p] / fte_per_month if fte_per_month > 0 else 0 for p in self.periods}
+            mat = self.data.materials.get(group_id)
+            fte_coeff = mat.fte_requirements if (mat and mat.fte_requirements > 0) else 1.0
+            # Use the group's own annual shift hours as denominator (mirrors VBA Aux2)
+            grp_monthly = self.group_monthly_shift_hours.get(group_id, 520.0)
+            annual_shift = grp_monthly * 12
+            aux2_str = (str(int(annual_shift))
+                        if annual_shift == int(annual_shift)
+                        else str(round(annual_shift, 2)))
+            fte_data = {p: hours[p] * fte_coeff / annual_shift if annual_shift > 0 else 0.0 for p in self.periods}
             self.rows_12.append(PlanningRow(
                 material_number=group_id,
                 material_name=';'.join(machine_names) if machine_names else '',
                 product_type='Machine Group', product_family='',
                 spc_product='', product_cluster='', product_name='',
                 line_type=LineType.FTE_REQUIREMENTS.value,
-                aux_column='1',
+                aux_column=str(fte_coeff),
+                aux_2_column=aux2_str,
                 values=fte_data.copy()
             ))
-        self._calculate_truck_fte(fte_per_month)
-        self._calculate_control_room_fte(fte_per_month)
+        self._calculate_truck_fte()
+        self._calculate_control_room_fte()
         print(f"       -> {len(self.rows_12)} FTE requirement rows")
 
-    def _calculate_truck_fte(self, fte_per_month):
-        truck_hours = {}
-        for mat_num, plan_data in self.demand_forecasts.items():
-            material = self.data.materials.get(mat_num)
-            if not material:
-                continue
-            truck_mat = None
-            if material.product_type.value == 'Bulk Product':
-                truck_mat = 'ZZZZ_TRUCK01'
-            elif material.product_type.value == 'Packaged Product':
-                truck_mat = 'ZZZZ_TRUCK02'
-            if not truck_mat:
-                continue
-            truck_material = self.data.materials.get(truck_mat)
-            if not truck_material or not truck_material.ton_per_truck or truck_material.ton_per_truck <= 0:
-                continue
-            if truck_mat not in truck_hours:
-                truck_hours[truck_mat] = {p: 0.0 for p in self.periods}
-            for period in self.periods:
-                qty = plan_data.get(period, 0.0)
-                if qty > 0:
-                    trucks = qty / truck_material.ton_per_truck
-                    hours = trucks * (truck_material.time_per_truck or 0)
-                    truck_hours[truck_mat][period] += hours
-        for truck_mat, hours in truck_hours.items():
-            tm = self.data.materials.get(truck_mat)
-            fte_data = {p: hours[p] / fte_per_month if fte_per_month > 0 else 0 for p in self.periods}
+    def _calculate_truck_fte(self):
+        # Reuse hours already computed by _calculate_truck_cap_util
+        truck_hours_cache = getattr(self, '_truck_hours_cache', {})
+        if not truck_hours_cache:
+            truck_hours_cache = self._compute_truck_hours()
+        truck_monthly_shift = self.shift_hours_lookup.get('3-shift system', 520.0)
+        truck_annual_shift = truck_monthly_shift * 12
+        aux2_str = (str(int(truck_annual_shift))
+                    if truck_annual_shift == int(truck_annual_shift)
+                    else str(round(truck_annual_shift, 2)))
+        for truck_mat_id, hours in truck_hours_cache.items():
+            tm = self.data.materials.get(truck_mat_id)
+            fte_coeff = tm.fte_requirements if (tm and tm.fte_requirements > 0) else 1.0
+            fte_data = {p: hours[p] * fte_coeff / truck_annual_shift if truck_annual_shift > 0 else 0.0 for p in self.periods}
             self.rows_12.append(PlanningRow(
-                material_number=truck_mat, material_name=tm.name if tm else '',
+                material_number=truck_mat_id, material_name=tm.name if tm else '',
                 product_type='Machine Group', product_family='',
                 spc_product='', product_cluster='', product_name='',
                 line_type=LineType.FTE_REQUIREMENTS.value,
-                aux_column='1', values=fte_data.copy()
+                aux_column=str(fte_coeff), aux_2_column=aux2_str, values=fte_data.copy()
             ))
 
-    def _calculate_control_room_fte(self, fte_per_month):
+    def _calculate_control_room_fte(self):
+        # VBA ControlRoomFormulas FTE: cap_util_monthly * fte_coeff / annual_shift_hours
+        # = (shift_hours) * fte_coeff / (shift_hours * 12) = fte_coeff / 12 per month
         shift_hours = self.shift_hours_lookup.get('3-shift system', 520.0)
-        fte_val = shift_hours / fte_per_month if fte_per_month > 0 else 0
+        annual_shift = shift_hours * 12
+        aux2_str = (str(int(annual_shift))
+                    if annual_shift == int(annual_shift)
+                    else str(round(annual_shift, 2)))
+        mat = self.data.materials.get('ZZZZZ_CONTROLROOM')
+        fte_coeff = mat.fte_requirements if (mat and mat.fte_requirements > 0) else 1.0
+        fte_val = shift_hours * fte_coeff / annual_shift if annual_shift > 0 else 0.0
         self.rows_12.append(PlanningRow(
             material_number='ZZZZZ_CONTROLROOM',
             material_name='Control room operators',
             product_type='Machine Group', product_family='',
             spc_product='', product_cluster='', product_name='',
             line_type=LineType.FTE_REQUIREMENTS.value,
-            aux_column='1', values={p: fte_val for p in self.periods}
+            aux_column=str(fte_coeff), aux_2_column=aux2_str, values={p: fte_val for p in self.periods}
         ))

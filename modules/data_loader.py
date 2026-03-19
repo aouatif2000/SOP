@@ -70,6 +70,15 @@ class DataLoader:
         self._load_cost_raw_material()
         self._load_cost_machine_hour()
         self._load_valuation_params()
+        routing_wcs = {
+            ri.work_center
+            for ris in self.routing.values()
+            for ri in ris
+        }
+        machine_codes = set(self.machines.keys())
+        unmatched = routing_wcs - machine_codes
+        if unmatched:
+            print(f"  WARNING: routing work-centers not in OEE sheet: {sorted(unmatched)}")
         print("-" * 60)
         print(f"  Materials: {len(self.materials)}, BOM: {len(self.bom)}, Routings: {sum(len(v) for v in self.routing.values())}")
         print(f"  Machines: {len(self.machines)}, Groups: {len(self.machine_groups)}")
@@ -180,12 +189,14 @@ class DataLoader:
                 time_per_truck=float(row.get('Time per truck')) if pd.notna(row.get('Time per truck')) else None,
                 control_room=int(row.get('Control Room', 0)) if pd.notna(row.get('Control Room')) else 0,
                 default_inventory_value=self._safe_float(row.get('Default inventory value', 0)),
-                is_active=row.get('Active', 1) == 1
+                is_active=row.get('Active', 1) == 1,
+                product_type_raw=product_type_str,
             )
         print(f"  Materials: {len(self.materials)}")
 
     def _load_bom(self):
         df = pd.read_excel(self.excel_file, sheet_name='BOM')
+        print(f"  BOM columns: {list(df.columns)}")
         for _, row in df.iterrows():
             parent = str(row.get('Material', '')).strip()
             component = str(row.get('Component', '')).strip()
@@ -228,7 +239,10 @@ class DataLoader:
             avail = {}
             for col, ps in period_columns:
                 val = row.get(col)
-                avail[ps] = float(val) if pd.notna(val) else 1.0
+                raw_avail = float(val) if pd.notna(val) else 1.0
+                avail[ps] = raw_avail / 100.0 if raw_avail > 1.0 else raw_avail
+                if len(avail) == 1:   # first period for this machine
+                    print(f"  OEE avail sample ({mc}): raw={raw_avail} -> stored={avail.get(ps, raw_avail)}")
             oee = float(row.get('OEE (%)', 0.8))
             if oee > 1:
                 oee = oee / 100
@@ -332,13 +346,14 @@ class DataLoader:
 
     def _load_safety_stock(self):
         df = pd.read_excel(self.excel_file, sheet_name='Safety stock')
+        print(f"  Safety stock columns: {list(df.columns)}")
         for _, row in df.iterrows():
             mn = str(row.get('Material number', '')).strip()
             if not mn or mn == 'nan':
                 continue
             self.safety_stock[mn] = SafetyStockConfig(
                 material_number=mn,
-                safety_stock=float(row.get('Final stafety stock', 0)) if pd.notna(row.get('Final stafety stock')) else 0,
+                safety_stock=float(row.get('Final safety stock', 0)) if pd.notna(row.get('Final safety stock')) else 0,
                 lot_size=max(1, float(row.get('Lot size', 1)) if pd.notna(row.get('Lot size')) else 1),
                 strategic_stock=float(row.get('Strategic stock', 0)) if pd.notna(row.get('Strategic stock')) else 0,
                 target_stock=float(row.get('Target stock', 0)) if pd.notna(row.get('Target stock')) else 0

@@ -1796,7 +1796,18 @@ async function _doUpload(file) {
         document.getElementById('kpi-mat').textContent = data.summary.materials;
         document.getElementById('kpi-bom').textContent = data.summary.bom_items;
         document.getElementById('calcBtn').disabled = false;
-        log('Raw data loaded: ' + data.filename);
+        // Auto-populate planning parameters from the Config sheet
+        if (data.planning_month) {
+            document.getElementById('planningMonth').value = data.planning_month;
+        }
+        if (data.months_actuals !== undefined) {
+            document.getElementById('monthsActuals').value = data.months_actuals;
+        }
+        if (data.months_forecast !== undefined) {
+            document.getElementById('monthsForecast').value = data.months_forecast;
+        }
+        updateHorizonDisplay();
+        log('Raw data loaded: ' + data.filename + (data.planning_month ? ' | Planning month: ' + data.planning_month : ''));
         _markAutoSaved();
         status('Click Calculate');
         await loadSessions();

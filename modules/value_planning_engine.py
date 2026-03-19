@@ -39,9 +39,6 @@ class ValuePlanningEngine:
 
         # Pre-build lookup sets for row filtering (VBA checks at generation time)
         self._purchase_plan_materials: Set[str] = set()
-        self._prod_line_materials: Set[str] = set()       # ProdLineClmn == 1
-        self._mill_group_materials: Set[str] = set()       # MillGroupClmn == 1
-        self._packaging_group_materials: Set[str] = set()  # PackagingGroupClmn == 1
 
         self._build_lookups()
 
@@ -59,15 +56,6 @@ class ValuePlanningEngine:
         # Materials that have a "07. Purchase plan" row
         for row in self.planning_results.get(LineType.PURCHASE_PLAN.value, []):
             self._purchase_plan_materials.add(row.material_number)
-
-        # Material master flags
-        for mat_num, mat in self.data.materials.items():
-            if mat.production_line and str(mat.production_line) == '1':
-                self._prod_line_materials.add(mat_num)
-            if mat.mill_machine_group and str(mat.mill_machine_group) == '1':
-                self._mill_group_materials.add(mat_num)
-            if mat.packaging_machine_group and str(mat.packaging_machine_group) == '1':
-                self._packaging_group_materials.add(mat_num)
 
     # ------------------------------------------------------------------
     # Public
@@ -262,8 +250,11 @@ class ValuePlanningEngine:
         rows = self.planning_results.get(LineType.CAPACITY_UTILIZATION.value, [])
         converted = 0
         for row in rows:
-            # VBA: only ProdLineClmn = 1 rows
-            if row.material_number not in self._prod_line_materials:
+            # VBA: only rows in the production-line section of the planning sheet.
+            # In Python these are machine-level aggregation rows, identified by product_type='Machine'.
+            # (Material-level routing rows have product_type = the material's product type,
+            #  group-level rows have product_type = 'Machine Group'.)
+            if row.product_type != 'Machine':
                 continue
 
             # VBA: lookupValue = MachineNameClmn (col B) = machine code

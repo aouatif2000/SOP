@@ -1,8 +1,8 @@
 {
-  "active_session_id": "e532ddb7-53b2-4512-8cdd-185d439113f3",
+  "active_session_id": "07e8254d-02ea-42e1-932b-dc7d1a38aef7",
   "sessions": {
-    "e532ddb7-53b2-4512-8cdd-185d439113f3": {
-      "id": "e532ddb7-53b2-4512-8cdd-185d439113f3",
+    "78e16781-5a15-4ad7-a73a-2131dcee7e23": {
+      "id": "78e16781-5a15-4ad7-a73a-2131dcee7e23",
       "file_path": "C:\\Users\\HP\\OneDrive\\Documents\\SOP\\SOP\\uploads\\03_2025_December_SOP consolidation_MS_RECONC.xlsm",
       "filename": "03_2025_December_SOP consolidation_MS_RECONC.xlsm",
       "custom_name": null,
@@ -14,7 +14,27 @@
         "site": "NLX1",
         "planning_month": ""
       },
-      "uploaded_at": "2026-03-17T00:36:38.442472",
+      "uploaded_at": "2026-03-19T02:59:22.845076",
+      "parameters": {
+        "planning_month": "2026/01",
+        "months_actuals": 12,
+        "months_forecast": 12
+      }
+    },
+    "07e8254d-02ea-42e1-932b-dc7d1a38aef7": {
+      "id": "07e8254d-02ea-42e1-932b-dc7d1a38aef7",
+      "file_path": "C:\\Users\\HP\\OneDrive\\Documents\\SOP\\SOP\\uploads\\03_2025_December_SOP consolidation_MS_RECONC.xlsm",
+      "filename": "03_2025_December_SOP consolidation_MS_RECONC.xlsm",
+      "custom_name": null,
+      "metadata": {
+        "materials": 274,
+        "bom_items": 336,
+        "machines": 24,
+        "periods": 12,
+        "site": "NLX1",
+        "planning_month": ""
+      },
+      "uploaded_at": "2026-03-19T03:13:03.338778",
       "parameters": {
         "planning_month": "2026/01",
         "months_actuals": 12,
