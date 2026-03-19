@@ -67,27 +67,32 @@ class ForecastEngine:
                starting from column ForecastActualStartClmn (position 0 of date columns).
                This is purely positional — VBA takes the first N date-valued columns
                regardless of their period labels.
-        AUX2 = AVERAGE of the planning-period forecast values placed in the planning
-               sheet (PlanningStartForecast : PlanningEndForecast), i.e. one value
-               per period in self.periods.
+        AUX2 = AVERAGE of ForecastMonths columns starting at
+               ForecastActualStartClmn + ForecastActualsMonths + 1.
+               The +1 is the VBA gap-skip offset (PlanningStartForecastClmn formula).
+               This is also positional — it is NOT derived from data.periods so it
+               stays anchored even when the UI shifts the planning_month.
         """
         if not self.periods:
             return "0", "0"
 
-        # AUX1: positional average of first months_actuals entries in Forecast sheet.
-        # Actuals always occupy the earliest (leftmost) date columns; sorting by key
-        # reproduces the left-to-right column order.
         all_sorted_aux = sorted(forecast_data.items())
         all_values_aux = [v for _, v in all_sorted_aux]
+
+        # AUX1: positional average of first months_actuals entries (leftmost date columns).
         if self.months_actuals > 0 and all_values_aux:
             actuals_pool = all_values_aux[:self.months_actuals]
             aux_1 = round(sum(actuals_pool) / len(actuals_pool)) if actuals_pool else 0
         else:
             aux_1 = 0
 
-        # AUX2: average of the values placed in the planning columns (self.periods).
-        planning_pool = [forecast_data.get(p, 0.0) for p in self.periods]
-        aux_2 = round(sum(planning_pool) / len(planning_pool)) if planning_pool else 0
+        # AUX2: positional average of months_forecast entries starting at
+        # months_actuals + 1.  The +1 mirrors VBA's PlanningStartForecastClmn offset
+        # (ForecastActualStartClmn + ForecastActualsMonths + 1), which skips one
+        # position between the actuals block and the forecast block.
+        aux2_start = self.months_actuals + 1
+        aux2_pool = all_values_aux[aux2_start : aux2_start + self.months_forecast]
+        aux_2 = round(sum(aux2_pool) / len(aux2_pool)) if aux2_pool else 0
 
         return str(aux_1), str(aux_2)
 
