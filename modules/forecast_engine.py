@@ -40,7 +40,7 @@ class ForecastEngine:
             for period in self.periods:
                 self.results[mat_num][period] = forecast_data.get(period, 0.0)
 
-            aux_1, aux_2 = self._calculate_aux_columns(mat_num, forecast_data)
+            aux_1, aux_2, starting_stock = self._calculate_aux_columns(mat_num, forecast_data)
 
             row = PlanningRow(
                 material_number=mat_num,
@@ -53,6 +53,7 @@ class ForecastEngine:
                 line_type=LineType.DEMAND_FORECAST.value,
                 aux_column=aux_1,
                 aux_2_column=aux_2,
+                starting_stock=starting_stock,
                 values=self.results[mat_num].copy()
             )
             self.rows.append(row)
@@ -62,19 +63,18 @@ class ForecastEngine:
 
     def _calculate_aux_columns(self, mat_num: str, forecast_data: Dict[str, float]) -> tuple:
         """
-        VBA Logic:
-        AUX1 = AVERAGE of the first ForecastActualsMonths columns in the Forecast sheet,
-               starting from column ForecastActualStartClmn (position 0 of date columns).
-               This is purely positional — VBA takes the first N date-valued columns
-               regardless of their period labels.
-        AUX2 = AVERAGE of ForecastMonths columns starting at
-               ForecastActualStartClmn + ForecastActualsMonths + 1.
-               The +1 is the VBA gap-skip offset (PlanningStartForecastClmn formula).
-               This is also positional — it is NOT derived from data.periods so it
-               stays anchored even when the UI shifts the planning_month.
+        All three positional values derived from sorted forecast columns:
+
+        AUX1         = AVERAGE of first ForecastActualsMonths columns (positions 0..N-1).
+        Starting stock = value at position ForecastActualsMonths + 1 — the same
+                         +1 gap-skip VBA uses for PlanningStartForecastClmn.
+                         This is the 'initial_date' forecast value shown in the
+                         'Starting stock' column of the VBA planning sheet.
+        AUX2         = AVERAGE of ForecastMonths columns starting at that same
+                         position (ForecastActualsMonths + 1).
         """
         if not self.periods:
-            return "0", "0"
+            return "0", "0", 0.0
 
         all_sorted_aux = sorted(forecast_data.items())
         all_values_aux = [v for _, v in all_sorted_aux]
@@ -86,15 +86,13 @@ class ForecastEngine:
         else:
             aux_1 = 0
 
-        # AUX2: positional average of months_forecast entries starting at
-        # months_actuals + 1.  The +1 mirrors VBA's PlanningStartForecastClmn offset
-        # (ForecastActualStartClmn + ForecastActualsMonths + 1), which skips one
-        # position between the actuals block and the forecast block.
-        aux2_start = self.months_actuals + 1
-        aux2_pool = all_values_aux[aux2_start : aux2_start + self.months_forecast]
+        # Starting stock + AUX2 both anchored at position months_actuals + 1.
+        anchor = self.months_actuals + 1
+        starting_stock = all_values_aux[anchor] if anchor < len(all_values_aux) else 0.0
+        aux2_pool = all_values_aux[anchor : anchor + self.months_forecast]
         aux_2 = round(sum(aux2_pool) / len(aux2_pool)) if aux2_pool else 0
 
-        return str(aux_1), str(aux_2)
+        return str(aux_1), str(aux_2), starting_stock
 
     def get_forecast(self, material: str, period: str) -> float:
         return self.results.get(material, {}).get(period, 0.0)
