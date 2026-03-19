@@ -29,18 +29,18 @@ class ForecastEngine:
                 continue  # Skip materials not in material master
 
             # VBA DemandForecast: copies Forecast sheet column ForecastStartClmn+i
+            # (where ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1)
             # to Planning column PlanningStartForecast+i.
-            # VBA uses positional +1 to skip the gap column that sits between actuals
-            # and forecast in the Excel sheet.  Python's _load_forecasts already
-            # excludes that gap column (it only reads date-formatted columns), so the
-            # gap is absent from forecast_data entirely.  Using a direct period key
-            # lookup is therefore equivalent to what VBA does — no positional offset
-            # needed — and is also robust to any planning-month shift.
-            self.results[mat_num] = {}
-            for period in self.periods:
-                self.results[mat_num][period] = forecast_data.get(period, 0.0)
+            # This is POSITIONAL, not key-based. sorted_forecast[anchor + i] is the
+            # value for planning period i, regardless of that column's date label.
+            # anchor = months_actuals + 1 (same +1 used for Aux2 / starting_stock).
+            aux_1, aux_2, starting_stock, all_sorted = self._calculate_aux_columns(mat_num, forecast_data)
 
-            aux_1, aux_2, starting_stock = self._calculate_aux_columns(mat_num, forecast_data)
+            anchor = self.months_actuals + 1
+            self.results[mat_num] = {}
+            for i, period in enumerate(self.periods):
+                idx = anchor + i
+                self.results[mat_num][period] = all_sorted[idx][1] if idx < len(all_sorted) else 0.0
 
             row = PlanningRow(
                 material_number=mat_num,
@@ -63,18 +63,15 @@ class ForecastEngine:
 
     def _calculate_aux_columns(self, mat_num: str, forecast_data: Dict[str, float]) -> tuple:
         """
-        All three positional values derived from sorted forecast columns:
+        All positional values derived from sorted forecast columns (left→right order):
 
-        AUX1         = AVERAGE of first ForecastActualsMonths columns (positions 0..N-1).
-        Starting stock = value at position ForecastActualsMonths + 1 — the same
-                         +1 gap-skip VBA uses for PlanningStartForecastClmn.
-                         This is the 'initial_date' forecast value shown in the
-                         'Starting stock' column of the VBA planning sheet.
-        AUX2         = AVERAGE of ForecastMonths columns starting at that same
-                         position (ForecastActualsMonths + 1).
+        AUX1          = AVERAGE of positions 0..months_actuals-1
+        Starting stock = value at position months_actuals+1  (anchor, same as Aux2 start)
+        AUX2          = AVERAGE of positions anchor..anchor+months_forecast-1
+        all_sorted    = returned so caller can reuse for monthly value fill
         """
         if not self.periods:
-            return "0", "0", 0.0
+            return "0", "0", 0.0, []
 
         all_sorted_aux = sorted(forecast_data.items())
         all_values_aux = [v for _, v in all_sorted_aux]
@@ -86,13 +83,13 @@ class ForecastEngine:
         else:
             aux_1 = 0
 
-        # Starting stock + AUX2 both anchored at position months_actuals + 1.
+        # anchor = months_actuals + 1 (VBA's PlanningStartForecastClmn offset)
         anchor = self.months_actuals + 1
         starting_stock = all_values_aux[anchor] if anchor < len(all_values_aux) else 0.0
         aux2_pool = all_values_aux[anchor : anchor + self.months_forecast]
         aux_2 = round(sum(aux2_pool) / len(aux2_pool)) if aux2_pool else 0
 
-        return str(aux_1), str(aux_2), starting_stock
+        return str(aux_1), str(aux_2), starting_stock, all_sorted_aux
 
     def get_forecast(self, material: str, period: str) -> float:
         return self.results.get(material, {}).get(period, 0.0)
