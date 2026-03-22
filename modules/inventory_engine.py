@@ -67,29 +67,43 @@ class InventoryEngine:
         rows.append(self._make_row(mat_num, material, LineType.TOTAL_DEMAND.value,
                                    values=total_demand))
 
-        # === LINE 05: Minimum Target Stock = safety_stock + strategic_stock ===
+        # === LINE 05: Minimum Target Stock ===
+        # VBA Method A (default): constant = safety_stock + strategic_stock
+        # VBA Method B (moving average): CreateTargetStock_MovingAverage with window=3
+        MOVING_AVG_WINDOW = 3
         ss_config = self.data.safety_stock.get(mat_num)
-        if override_target_stock is not None:
-            target_value = override_target_stock
-        else:
-            target_value = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
+        base_target = (ss_config.safety_stock + ss_config.strategic_stock) if ss_config else 0.0
 
-        # Aux2 = IFERROR( Aux1 / AVERAGE(Line03 across forecast columns only), 0 )
-        # VBA uses the full planning horizon (PlanningStartForecastClmn : PlanningEndForecastClmn).
-        forecast_periods = self.periods
-        forecast_demand_values = [total_demand.get(p, 0.0) for p in forecast_periods]
+        forecast_demand_values = [total_demand.get(p, 0.0) for p in self.periods]
         avg_forecast_demand = sum(forecast_demand_values) / len(forecast_demand_values) if forecast_demand_values else 0.0
-        coverage = round(target_value / avg_forecast_demand, 1) if avg_forecast_demand > 0 else 0.0
+
+        if override_target_stock is not None:
+            target_values = {p: override_target_stock for p in self.periods}
+        elif ss_config and ss_config.use_moving_average and avg_forecast_demand > 0:
+            # VBA Method B: per-period target = moving_avg(demand) * coverage_months
+            coverage_months = base_target / avg_forecast_demand
+            target_values = {}
+            for idx, p in enumerate(self.periods):
+                window_end = min(idx + MOVING_AVG_WINDOW, len(self.periods))
+                window = [total_demand.get(self.periods[j], 0.0) for j in range(idx, window_end)]
+                window_avg = sum(window) / len(window) if window else 0.0
+                target_values[p] = window_avg * coverage_months
+        else:
+            target_values = {p: base_target for p in self.periods}
+
+        # For display: use base_target for aux_column, average of target_values for coverage
+        display_target = base_target if override_target_stock is None else override_target_stock
+        coverage = round(display_target / avg_forecast_demand, 1) if avg_forecast_demand > 0 else 0.0
         # Append '!' as a warning flag when coverage exceeds 6 months (VBA: light red RGB 255,199,206)
         if coverage > 0:
             coverage_str = f"{coverage:.1f}!" if coverage > 6 else f"{coverage:.1f}"
         else:
             coverage_str = None
 
-        target_stock_data = {p: target_value for p in self.periods}
+        target_stock_data = dict(target_values)
         rows.append(self._make_row(
             mat_num, material, LineType.MIN_TARGET_STOCK.value,
-            aux_column=(str(int(target_value)) if target_value == int(target_value) else str(round(target_value, 2))) if target_value else None,
+            aux_column=(str(int(display_target)) if display_target == int(display_target) else str(round(display_target, 2))) if display_target else None,
             aux_2_column=coverage_str,
             values=target_stock_data,
         ))
@@ -130,10 +144,11 @@ class InventoryEngine:
         purchase_receipt = {p: 0.0 for p in self.periods} if needs_purchase else None
 
         running_stock = initial_stock
+        min_prod_qty = bom_header_qty  # VBA Add_MinProdQty: minimum batch = BOM header quantity
 
         for i, period in enumerate(self.periods):
             demand = total_demand.get(period, 0.0)
-            raw_need = target_value - running_stock + demand
+            raw_need = target_values[period] - running_stock + demand
 
             prod_qty = 0.0
             purch_qty = 0.0
@@ -143,6 +158,7 @@ class InventoryEngine:
                     prod_need = raw_need * production_fraction_config
                     if prod_need > 0:
                         prod_qty = ceiling_multiple(prod_need, bom_header_qty)
+                        prod_qty = max(prod_qty, min_prod_qty)
                     purch_need = raw_need - prod_qty
                     if purch_need > 0 and i >= lead_time:
                         purch_qty = ceiling_multiple(purch_need, self.data.get_purchase_moq(mat_num))
@@ -150,6 +166,7 @@ class InventoryEngine:
             elif needs_production:
                 if raw_need > 0:
                     prod_qty = ceiling_multiple(raw_need, bom_header_qty)
+                    prod_qty = max(prod_qty, min_prod_qty)
 
             elif needs_purchase:
                 if raw_need > 0 and i >= lead_time:
@@ -194,19 +211,20 @@ class InventoryEngine:
                     if i < lead_time:
                         continue
                     demand    = total_demand.get(period, 0.0)
-                    raw_need  = target_value - running_stock + demand
+                    raw_need  = target_values[period] - running_stock + demand
                     prod_qty  = 0.0
                     purch_qty = 0.0
                     if raw_need > 0:
                         prod_need = raw_need * production_fraction_config
                         if prod_need > 0:
                             prod_qty = ceiling_multiple(prod_need, bom_header_qty)
+                            prod_qty = max(prod_qty, min_prod_qty)
                         purch_need = raw_need - prod_qty
-                        if purch_need > 0 and i > lead_time:
+                        if purch_need > 0 and i >= lead_time:
                             purch_qty = ceiling_multiple(
                                 purch_need, self.data.get_purchase_moq(mat_num))
                     production_plan[period] = prod_qty
-                    if i > lead_time:
+                    if i >= lead_time:
                         purchase_receipt[period] = purch_qty
                     running_stock = running_stock - demand + prod_qty + \
                         purchase_receipt.get(period, 0.0)
@@ -263,7 +281,7 @@ class InventoryEngine:
 
         return {
             'total_demand': total_demand,
-            'target_stock_value': target_value,
+            'target_stock_value': display_target,
             'production_plan': production_plan,
             'purchase_receipt': purchase_receipt,
             'purchase_plan': purchase_plan,

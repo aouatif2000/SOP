@@ -21,8 +21,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 
 def run_cli(file_path: str, output_path: str = None, planning_month: str = None,
-            months_actuals: int = 0, months_forecast: int = 12):
+            months_actuals: int = 0, months_forecast: int = 12,
+            export_db: bool = False, db_path: str = None):
     from modules.planning_engine import PlanningEngine
+    from modules.cycle_manager import CycleManager
+    from modules.mom_comparison_engine import MoMComparisonEngine
+    from modules.database_exporter import DatabaseExporter
 
     engine = PlanningEngine(
         file_path,
@@ -32,11 +36,51 @@ def run_cli(file_path: str, output_path: str = None, planning_month: str = None,
     )
     engine.run()
 
-    if output_path:
-        engine.to_excel_with_values(output_path)
-    else:
+    if not output_path:
         output_path = str(Path(file_path).stem) + '_Python_Results.xlsx'
-        engine.to_excel_with_values(output_path)
+
+    # --- Cycle Manager: load previous, save current ---
+    storage_dir = str(Path(output_path).parent or ".")
+    cycle_mgr = CycleManager(storage_dir)
+    previous_df = cycle_mgr.load_previous_cycle()
+
+    current_df = engine.to_dataframe()
+
+    # Save current results as the new "previous" for next run
+    cycle_mgr.save_current_as_previous(current_df)
+
+    # --- MoM Comparison ---
+    mom_df = None
+    if not previous_df.empty:
+        mom_engine = MoMComparisonEngine(current_df, previous_df)
+        mom_df = mom_engine.calculate()
+        scatter_data = mom_engine.create_scatter_data()
+        if not mom_df.empty:
+            print(f"  MoM comparison: {len(mom_df)} delta rows, {len(scatter_data['materials'])} materials in scatter")
+        else:
+            print("  MoM comparison: no overlapping inventory data")
+    else:
+        print("  No previous cycle found — MoM comparison skipped (will be available next run)")
+
+    # --- Export to Excel (with MoM sheet if available) ---
+    engine.to_excel_with_values(output_path, previous_cycle_df=previous_df if not previous_df.empty else None)
+
+    # --- Database Export ---
+    if export_db:
+        db_exporter = DatabaseExporter(
+            current_df,
+            site=engine.data.config.site,
+            initial_date=engine.data.config.initial_date,
+        )
+        if db_path:
+            db_export_df = db_exporter.export_to_dataframe()
+            db_export_df.to_excel(db_path, index=False)
+            print(f"  DB export written to: {db_path}")
+        else:
+            db_default = str(Path(output_path).stem) + '_DB_Export.xlsx'
+            db_export_df = db_exporter.export_to_dataframe()
+            db_export_df.to_excel(db_default, index=False)
+            print(f"  DB export written to: {db_default}")
 
     return engine
 
@@ -102,6 +146,8 @@ def main():
     parser.add_argument('--planning-month', type=str, help='Planning month (e.g., 2025-04)')
     parser.add_argument('--months-actuals', type=int, default=0, help='Months of actuals in forecast')
     parser.add_argument('--months-forecast', type=int, default=12, help='Forecast horizon months')
+    parser.add_argument('--export-db', action='store_true', help='Export planning results to DB-ready flat table')
+    parser.add_argument('--db-path', type=str, help='Output path for DB export Excel file')
 
     args = parser.parse_args()
 
@@ -113,7 +159,9 @@ def main():
             args.output,
             planning_month=args.planning_month,
             months_actuals=args.months_actuals,
-            months_forecast=args.months_forecast
+            months_forecast=args.months_forecast,
+            export_db=args.export_db,
+            db_path=args.db_path,
         )
     else:
         run_web()

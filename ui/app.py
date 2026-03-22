@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from modules.planning_engine import PlanningEngine
 from modules.models import LineType
+from modules.cycle_manager import CycleManager
+from modules.mom_comparison_engine import MoMComparisonEngine
+from modules.database_exporter import DatabaseExporter
 
 app = Flask(__name__, 
             template_folder=str(Path(__file__).parent / 'templates'),
@@ -22,6 +25,10 @@ import uuid as _uuid
 sessions: dict = {}           # session_id -> session dict
 active_session_id: str = None  # currently selected session
 scenarios: dict = {}          # scenario_id -> scenario snapshot
+
+# Shared CycleManager — stores previous-cycle snapshots in the exports/ folder
+_CYCLE_STORAGE_DIR = Path(__file__).parent.parent / 'exports'
+_cycle_manager = CycleManager(str(_CYCLE_STORAGE_DIR))
 
 # Line types that users are permitted to edit directly.
 # Computed lines (03, 04, 07-12) are intentionally excluded.
@@ -215,6 +222,14 @@ def run_calculations():
             'months_actuals':  months_actuals,
             'months_forecast': months_forecast,
         }
+
+        # --- Save current results as previous-cycle snapshot for MoM ---
+        try:
+            current_df = engine.to_dataframe()
+            _cycle_manager.save_current_as_previous(current_df)
+        except Exception as _cm_exc:
+            print(f'[cycle_manager] snapshot save warning: {_cm_exc}')
+
         _save_sessions_to_disk()
 
         return jsonify({
@@ -488,12 +503,113 @@ def export():
     except Exception:
         pass
 
-    current_engine.to_excel_with_values(str(export_path), inventory_quality_engine=_iq_engine_export)
+    # --- Load previous cycle for MoM comparison sheet ---
+    _prev_df = None
+    try:
+        if _cycle_manager.has_previous_cycle():
+            _prev_df = _cycle_manager.load_previous_cycle()
+            if _prev_df.empty:
+                _prev_df = None
+                print('[export] Previous cycle loaded but empty — MoM sheet skipped')
+            else:
+                print(f'[export] Previous cycle loaded ({len(_prev_df)} rows) — MoM sheet will be included')
+        else:
+            print('[export] No previous cycle on disk — MoM sheet skipped (will be available after next calculation)')
+    except Exception as _prev_exc:
+        print(f'[export] Could not load previous cycle: {_prev_exc}')
+
+    current_engine.to_excel_with_values(
+        str(export_path),
+        inventory_quality_engine=_iq_engine_export,
+        previous_cycle_df=_prev_df,
+    )
 
     # Apply edit highlights and summary sheet if there are any edits
     _apply_edit_highlights(str(export_path), current_engine)
 
     return send_file(str(export_path), as_attachment=True)
+
+
+@app.route('/api/export_db', methods=['POST'])
+def export_db():
+    """Export planning results to a flat DB-ready Excel file via DatabaseExporter."""
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    try:
+        planning_df = current_engine.to_dataframe()
+        site = getattr(current_engine.data.config, 'site', 'NLX1')
+        initial_date = current_engine.data.config.initial_date
+
+        exporter = DatabaseExporter(planning_df, site, initial_date)
+        db_df = exporter.export_to_dataframe()
+
+        if db_df.empty:
+            return jsonify({'error': 'No data to export (no matching line types)'}), 400
+
+        export_dir = Path(__file__).parent.parent / 'exports'
+        export_dir.mkdir(exist_ok=True)
+
+        # Allow caller to override filename via JSON body
+        req_data = request.get_json(silent=True) or {}
+        filename = req_data.get('filename', '').strip()
+        if not filename:
+            filename = f'SOP_DB_Export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        # Sanitise — keep only safe characters
+        safe_name = ''.join(c for c in filename if c.isalnum() or c in '._- ')
+        if not safe_name.endswith('.xlsx'):
+            safe_name += '.xlsx'
+
+        export_path = export_dir / safe_name
+        db_df.to_excel(str(export_path), index=False)
+        print(f'[export_db] {len(db_df)} rows written → {export_path}')
+
+        return send_file(str(export_path), as_attachment=True, download_name=safe_name)
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+
+@app.route('/api/mom')
+def get_mom_comparison():
+    """Return MoM comparison data as JSON for the dashboard."""
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+
+    if not _cycle_manager.has_previous_cycle():
+        return jsonify({
+            'available': False,
+            'message': 'No previous cycle available — run calculations at least twice',
+        })
+
+    try:
+        previous_df = _cycle_manager.load_previous_cycle()
+        if previous_df.empty:
+            return jsonify({'available': False, 'message': 'Previous cycle snapshot is empty'})
+
+        current_df = current_engine.to_dataframe()
+        mom_engine = MoMComparisonEngine(current_df, previous_df)
+        comparison = mom_engine.calculate()
+        scatter = mom_engine.create_scatter_data()
+
+        if comparison.empty:
+            return jsonify({
+                'available': False,
+                'message': 'No overlapping inventory data between cycles',
+            })
+
+        return jsonify({
+            'available': True,
+            'comparison': comparison.to_dict(orient='records'),
+            'scatter': scatter,
+            'row_count': len(comparison),
+            'material_count': len(scatter.get('materials', [])),
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 
 def _apply_edit_highlights(path: str, engine):
@@ -1577,6 +1693,7 @@ _SESSION_SAVE_PATHS = {
     '/api/reset_edits',
     '/api/scenarios/save',
     '/api/scenarios/load',
+    '/api/export_db',
 }
 
 _SESSION_SAVE_METHODS = {'POST', 'DELETE'}

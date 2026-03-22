@@ -14,7 +14,7 @@ VBA Logic (from PDF):
 
 from typing import Dict, List
 from collections import defaultdict
-from modules.models import PlanningRow, LineType, ShiftSystem, SHIFT_HOURS, FTE_HOURS_PER_YEAR
+from modules.models import PlanningRow, LineType, ShiftSystem, ProductType, SHIFT_HOURS, FTE_HOURS_PER_YEAR
 from modules.data_loader import DataLoader
 
 
@@ -182,10 +182,13 @@ class CapacityEngine:
             for routing in routings:
                 wc = routing.work_center
                 base_qty = routing.base_quantity if routing.base_quantity > 0 else 1.0
-                std_time = routing.standard_time if routing.standard_time > 0 else 1.0
+                std_time = routing.standard_time
 
                 # AUX2 = BaseQty / StdValue (throughput rate)
-                aux2_val = base_qty / std_time if std_time > 0 else 1.0
+                if std_time == 0:
+                    aux2_val = 1.0  # match VBA behavior directly
+                else:
+                    aux2_val = base_qty / std_time
 
                 hours_data = {}
                 for period in self.periods:
@@ -214,6 +217,53 @@ class CapacityEngine:
                         aux_2_column=str(aux2_val),
                         values=hours_data.copy()
                     ))
+
+        # === VBA DeleteDoubleProcessRowsPackagedMaterials ===
+        # Remove duplicate cap util rows for packaged materials sharing work centers
+        # with BOM-related bulk materials, unless the work center is in the allowed list.
+        _ALLOWED_WCS = frozenset([
+            "TBMA A + C", "BB PE24", "BB H&B", "BB PE20", "BB PE25",
+            "ZVM07", "PE20", "PE25",
+        ])
+        _bulk_for_packaged: Dict[str, set] = defaultdict(set)
+        for b in self.data.bom:
+            p_mat = self.data.materials.get(b.parent_material)
+            c_mat = self.data.materials.get(b.component_material)
+            if not p_mat or not c_mat:
+                continue
+            if p_mat.product_type == ProductType.PACKAGED_PRODUCT and \
+               c_mat.product_type == ProductType.BULK_PRODUCT:
+                _bulk_for_packaged[b.parent_material].add(b.component_material)
+            elif p_mat.product_type == ProductType.BULK_PRODUCT and \
+                 c_mat.product_type == ProductType.PACKAGED_PRODUCT:
+                _bulk_for_packaged[b.component_material].add(b.parent_material)
+        _bulk_wcs: Dict[str, set] = defaultdict(set)
+        for row in self.rows_07_cap:
+            m = self.data.materials.get(row.material_number)
+            if m and m.product_type == ProductType.BULK_PRODUCT and row.aux_column:
+                _bulk_wcs[row.material_number].add(row.aux_column)
+        _remove_indices: set = set()
+        for idx, row in enumerate(self.rows_07_cap):
+            if row.material_number not in _bulk_for_packaged:
+                continue
+            wc = row.aux_column
+            if not wc or wc in _ALLOWED_WCS:
+                continue
+            for bulk_mat in _bulk_for_packaged[row.material_number]:
+                if wc in _bulk_wcs.get(bulk_mat, set()):
+                    _remove_indices.add(idx)
+                    break
+        if _remove_indices:
+            for idx in _remove_indices:
+                row = self.rows_07_cap[idx]
+                wc = row.aux_column
+                if wc in self.machine_hours_used:
+                    for p in self.periods:
+                        self.machine_hours_used[wc][p] -= row.values.get(p, 0.0)
+            self.rows_07_cap = [
+                r for i, r in enumerate(self.rows_07_cap) if i not in _remove_indices
+            ]
+            print(f"       -> Removed {len(_remove_indices)} duplicate packaged material rows")
 
         # 2. Machine-level aggregation rows (Z_MACHxx)
         # VBA: machine hours = sum(material hours) / OEE

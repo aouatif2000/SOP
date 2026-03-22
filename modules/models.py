@@ -168,6 +168,7 @@ class SafetyStockConfig:
     lot_size: float
     strategic_stock: float = 0.0
     target_stock: float = 0.0
+    use_moving_average: bool = False
 
 
 @dataclass

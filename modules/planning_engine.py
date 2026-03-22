@@ -121,8 +121,10 @@ class PlanningEngine:
                 self.data.config.initial_date = _pm
                 _month_shift = (_pm.year  - _config_initial_date.year)  * 12 \
                              + (_pm.month - _config_initial_date.month)
-                self.data.forecast_actuals_months = _original_actuals + _month_shift
-                print(f"  >> forecast_actuals_months updated: {_original_actuals} + {_month_shift} = {self.data.forecast_actuals_months}")
+                # VBA never modifies ForecastActualsMonths when InitialDate
+                # changes — ForecastStartClmn is always anchored to the
+                # original Config value.  Do NOT add _month_shift here.
+                print(f"  >> planning_month shift: {_month_shift} months from Config initial_date")
 
         # Copilot: VBA DefineVariables line 3443 sets end column from ForecastMonths only:
         # PlanningEndForecastClmn = PlanningStartForecastClmn + ForecastMonths - 1
@@ -139,10 +141,11 @@ class PlanningEngine:
 
         # ===== STEP 2: Demand Forecast (Line 01) =====
         print("\n[STEP 2] Calculating Demand Forecast (Line 01)...")
-        # Use config values if not explicitly overridden
-        actuals_months = _original_actuals
+        # VBA: ForecastStartClmn = ForecastActualStartClmn + ForecastActualsMonths + 1
+        # ForecastActualsMonths is always the ORIGINAL Config value — never shifted.
+        actuals_months = self.data.forecast_actuals_months
         forecast_months = self.months_forecast if self.months_forecast > 0 else self.data.config.forecast_months
-        print(f"  >> USING: actuals_months={actuals_months} (input={self.months_actuals}), forecast_months={forecast_months} (input={self.months_forecast})")
+        print(f"  >> USING: actuals_months={actuals_months}, forecast_months={forecast_months}")
         forecast_engine = ForecastEngine(self.data, actuals_months, forecast_months)
         forecast_rows = forecast_engine.calculate()
         self.results[LineType.DEMAND_FORECAST.value] = forecast_rows
@@ -399,15 +402,19 @@ class PlanningEngine:
                 rows_data.append(row_dict)
         df = pd.DataFrame(rows_data)
         # VBA SortPlanningSheet (line 4811): sort by material number ASC, line type ASC, aux1 ASC, aux2 ASC
-        def _sort_key(col):
-            if col.name in ('Aux Column', 'Aux 2 Column'):
-                return pd.to_numeric(col, errors='coerce').fillna(
-                    col.rank(method='dense', na_option='bottom'))
-            if col.name == 'Material number':
-                return col.astype(str)
-            return col
-
         if not df.empty:
+            # Cast sort-key columns to str so mixed types (str + numeric + None)
+            # don't crash pandas rank().  Aux columns stay as-is (numeric) because
+            # _sort_key handles them via pd.to_numeric.
+            for _sc in ('Material number', 'Line type'):
+                if _sc in df.columns:
+                    df[_sc] = df[_sc].fillna('').astype(str)
+
+            def _sort_key(col):
+                if col.name in ('Aux Column', 'Aux 2 Column'):
+                    return pd.to_numeric(col, errors='coerce').fillna(0)
+                return col
+
             df = df.sort_values(
                 by=['Material number', 'Line type', 'Aux Column', 'Aux 2 Column'],
                 ascending=[True, True, True, True],
@@ -421,12 +428,16 @@ class PlanningEngine:
         df.to_excel(output_path, sheet_name='Planning Results', index=False)
         print(f"\nResults exported to: {output_path}")
     
-    def to_excel_with_values(self, output_path: str, inventory_quality_engine=None):
+    def to_excel_with_values(self, output_path: str, inventory_quality_engine=None, previous_cycle_df=None):
         """Export both volume planning and value planning to Excel with VBA-matching formatting."""
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Volume planning sheet
+            # Volume planning sheet — written first and must stay visible so
+            # openpyxl never sees an empty/all-hidden workbook on save.
             df_volumes = self.to_dataframe()
             df_volumes.to_excel(writer, sheet_name='Planning sheet', index=False)
+            # Ensure the first sheet is never hidden (guards against IndexError
+            # "At least one sheet must be visible" on partial-write failures).
+            writer.book['Planning sheet'].sheet_state = 'visible'
 
             # Value planning sheet
             value_rows = []
@@ -902,6 +913,77 @@ class PlanningEngine:
             except Exception as _e3:
                 print(f"  Warning: Overview Top 10 chart skipped: {_e3}")
 
+            # ===== MoM Comparison sheet + scatter chart =====
+            mom_done = False
+            if previous_cycle_df is not None:
+                try:
+                    from modules.mom_comparison_engine import MoMComparisonEngine
+                    _mom_eng = MoMComparisonEngine(df_volumes, previous_cycle_df)
+                    _mom_df = _mom_eng.calculate()
+                    if not _mom_df.empty:
+                        _mom_df.to_excel(writer, sheet_name='MoM Comparison', index=False)
+                        _ws_mom = writer.sheets['MoM Comparison']
+
+                        # --- scatter chart: Current vs Previous inventory ---
+                        _scatter_data = _mom_eng.create_scatter_data()
+                        if _scatter_data['materials']:
+                            # Write scatter source data to a helper sheet
+                            _scat_df = pd.DataFrame({
+                                'Material': _scatter_data['materials'],
+                                'Previous Inventory': _scatter_data['previous'],
+                                'Current Inventory': _scatter_data['current'],
+                            })
+                            _scat_df.to_excel(writer, sheet_name='MoM Scatter Data', index=False)
+                            _ws_scat = writer.sheets['MoM Scatter Data']
+
+                            from openpyxl.chart import ScatterChart as _ScatChart, Reference as _ScatRef, Series as _ScatSeries
+                            from openpyxl.chart.marker import Marker as _Marker
+                            from openpyxl.drawing.fill import PatternFillProperties as _PFP, ColorChoice as _CC
+
+                            _scat_max_r = _scat_df.shape[0] + 1
+                            _sc = _ScatChart()
+                            _sc.title = 'MoM Inventory Scatter'
+                            _sc.x_axis.title = 'Previous Cycle Inventory'
+                            _sc.y_axis.title = 'Current Cycle Inventory'
+                            _sc.width = 25
+                            _sc.height = 15
+                            _sc.style = 13
+
+                            _x_vals = _ScatRef(_ws_scat, min_col=2, min_row=2, max_row=_scat_max_r)
+                            _y_vals = _ScatRef(_ws_scat, min_col=3, min_row=2, max_row=_scat_max_r)
+                            _series = _ScatSeries(_y_vals, _x_vals, title='Materials')
+                            _series.graphicalProperties.line.noFill = True  # no connecting line
+                            _sc.series.append(_series)
+
+                            # Apply per-point colours from quadrant logic
+                            for _pi, _hex_col in enumerate(_scatter_data['colors']):
+                                from openpyxl.chart.series import DataPoint as _DP
+                                from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+                                _dp = _DP(idx=_pi)
+                                _dp.graphicalProperties.solidFill = _hex_col
+                                _series.data_points.append(_dp)
+
+                            _ws_mom.add_chart(_sc, 'J2')
+                        mom_done = True
+                except Exception as _e_mom:
+                    print(f"  Warning: MoM comparison sheet skipped: {_e_mom}")
+
+            # ===== Reorder sheets to match VBA workbook tab order =====
+            _desired_order = [
+                'Planning sheet',
+                'Values_Planning sheet',
+                'FTE requirements',
+                'Inventory quality chart',
+                'Top 10 overstocks',
+                'High-level overview',
+                'MoM Comparison',
+                'MoM Scatter Data',
+            ]
+            _existing = wb.sheetnames
+            _ordered = [s for s in _desired_order if s in _existing]
+            _ordered += [s for s in _existing if s not in _ordered]
+            wb._sheets = [wb[s] for s in _ordered]
+
         print(f"\nResults exported to: {output_path}")
         print(f"  - Planning sheet (volumes)")
         print(f"  - Values_Planning sheet (financial)")
@@ -913,6 +995,8 @@ class PlanningEngine:
             print(f"  - Top 10 overstocks ({top10_count} materials)")
         if iq_chart_done:
             print(f"  - Inventory quality chart")
+        if mom_done:
+            print(f"  - MoM Comparison (with scatter chart)")
 
     def _apply_excel_formatting(self, ws, is_values_sheet=False):
         """Apply VBA-matching cell formatting to a planning worksheet.
@@ -971,6 +1055,7 @@ class PlanningEngine:
 
         # Locate key columns by reading the header row
         line_type_col = mat_num_col = data_col_start = starting_stock_col = None
+        aux_col_idx = aux2_col_idx = None
         for cell in ws[1]:
             hdr = str(cell.value or '')
             if hdr == 'Line type':
@@ -979,6 +1064,10 @@ class PlanningEngine:
                 mat_num_col = cell.column
             elif hdr == 'Starting stock':
                 starting_stock_col = cell.column
+            elif hdr == 'Aux Column':
+                aux_col_idx = cell.column
+            elif hdr == 'Aux 2 Column':
+                aux2_col_idx = cell.column
             elif period_re.match(hdr) and data_col_start is None:
                 data_col_start = cell.column
 
@@ -1047,6 +1136,24 @@ class PlanningEngine:
                 if starting_stock_col and col == starting_stock_col:
                     cell.number_format = num_fmt
 
+                # VBA FIX 7: Aux columns store exact float, display with #,##0
+                # Exception: Line 10 Aux Column uses "0%" (VBA AddVisualsToMaterials)
+                if (aux_col_idx and col == aux_col_idx) or \
+                        (aux2_col_idx and col == aux2_col_idx):
+                    # Coerce string-wrapped numbers to float so number_format works
+                    if isinstance(cell.value, str):
+                        try:
+                            cell.value = float(cell.value)
+                        except (ValueError, TypeError):
+                            pass
+                    if isinstance(cell.value, (int, float)):
+                        if is_l10 and aux_col_idx and col == aux_col_idx:
+                            cell.number_format = '0%'
+                        elif is_l09 and aux2_col_idx and col == aux2_col_idx:
+                            cell.number_format = '0%'
+                        else:
+                            cell.number_format = num_fmt
+
                 if not is_data:
                     continue
 
@@ -1056,6 +1163,8 @@ class PlanningEngine:
                 # Number format
                 if is_l10:
                     cell.number_format = '0.0%'
+                elif is_l09:
+                    cell.number_format = '0%'
                 else:
                     cell.number_format = num_fmt
 

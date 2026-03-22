@@ -93,20 +93,23 @@ class ForecastEngine:
             return "0", "0", [(p, 0.0) for p in self.periods]
 
         # AUX1: average of months_actuals periods starting from first_col_period
+        # VBA AVERAGE ignores blank cells — only include periods present in forecast_data
         aux1_values = [
-            forecast_data.get(self._offset_period(first, i), 0.0)
+            forecast_data[self._offset_period(first, i)]
             for i in range(self.months_actuals)
+            if self._offset_period(first, i) in forecast_data
         ]
-        aux_1 = round(sum(aux1_values) / len(aux1_values)) if aux1_values else 0
+        aux_1 = round(sum(aux1_values) / len(aux1_values), 2) if aux1_values else 0.0
 
         # AUX2: average of months_forecast periods starting from aux2_anchor (months_actuals+1)
         # This is the Config initial_date period onward (e.g. "2025-12".."2026-11")
         aux2_anchor = self._offset_period(first, self.months_actuals + 1)
         aux2_values = [
-            forecast_data.get(self._offset_period(aux2_anchor, i), 0.0)
+            forecast_data[self._offset_period(aux2_anchor, i)]
             for i in range(self.months_forecast)
+            if self._offset_period(aux2_anchor, i) in forecast_data
         ]
-        aux_2 = round(sum(aux2_values) / len(aux2_values)) if aux2_values else 0
+        aux_2 = round(sum(aux2_values) / len(aux2_values), 2) if aux2_values else 0.0
 
         # Monthly values: planning period i → forecast_data[aux2_anchor + i]
         # aux2_anchor = offset("2024-11", 13) = "2025-12" → sorted[13]
@@ -116,7 +119,8 @@ class ForecastEngine:
             for i, period in enumerate(self.periods)
         ]
 
-        return str(aux_1), str(aux_2), ordered_vals
+        # FIX 7: return exact float values; #,##0 formatting applied in Excel writer
+        return aux_1, aux_2, ordered_vals
 
     def get_forecast(self, material: str, period: str) -> float:
         return self.results.get(material, {}).get(period, 0.0)

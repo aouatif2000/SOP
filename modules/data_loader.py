@@ -241,7 +241,7 @@ class DataLoader:
             for col, ps in period_columns:
                 val = row.get(col)
                 raw_avail = float(val) if pd.notna(val) else 1.0
-                avail[ps] = raw_avail / 100.0 if raw_avail > 1.0 else raw_avail
+                avail[ps] = raw_avail if raw_avail <= 2.0 else raw_avail / 100.0
                 if len(avail) == 1:   # first period for this machine
                     print(f"  OEE avail sample ({mc}): raw={raw_avail} -> stored={avail.get(ps, raw_avail)}")
             oee = float(row.get('OEE (%)', 0.8))
@@ -355,12 +355,21 @@ class DataLoader:
             mn = str(row.get('Material number', '')).strip()
             if not mn or mn == 'nan':
                 continue
+            # VBA: 'Moving average' column flags materials using CreateTargetStock_MovingAverage
+            _ma_raw = row.get('Moving average', row.get('Target stock method', 0))
+            try:
+                _use_ma = bool(int(float(_ma_raw))) if pd.notna(_ma_raw) else False
+            except (ValueError, TypeError):
+                _use_ma = False
+            # Excel column is misspelled as 'Final stafety stock' — try both spellings
+            _ss_val = row.get('Final stafety stock', row.get('Final safety stock', None))
             self.safety_stock[mn] = SafetyStockConfig(
                 material_number=mn,
-                safety_stock=float(row.get('Final safety stock', 0)) if pd.notna(row.get('Final safety stock')) else 0,
+                safety_stock=float(_ss_val) if pd.notna(_ss_val) else 0,
                 lot_size=max(1, float(row.get('Lot size', 1)) if pd.notna(row.get('Lot size')) else 1),
                 strategic_stock=float(row.get('Strategic stock', 0)) if pd.notna(row.get('Strategic stock')) else 0,
-                target_stock=float(row.get('Target stock', 0)) if pd.notna(row.get('Target stock')) else 0
+                target_stock=float(row.get('Target stock', 0)) if pd.notna(row.get('Target stock')) else 0,
+                use_moving_average=_use_ma,
             )
         print(f"  Safety stock: {len(self.safety_stock)} configs")
 
@@ -632,7 +641,7 @@ class DataLoader:
     def get_lead_time(self, mat_num):
         if mat_num in self.purchase_lead_times:
             return self.purchase_lead_times[mat_num]
-        return 1  # Default
+        return 0  # VBA default: no lead time delay if not in purchase sheet
 
     def get_bom_for_parent(self, parent):
         return [b for b in self.bom if b.parent_material == parent and not b.is_coproduct]
