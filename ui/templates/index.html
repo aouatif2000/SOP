@@ -251,7 +251,10 @@
             <!-- Charts Row -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6">
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-1">Utilization by Machine <span class="text-xs font-normal text-slate-500">(first 6 periods)</span></h3>
+                    <div class="flex items-center justify-between mb-1">
+                        <h3 class="font-semibold">Utilization by Machine <span class="text-xs font-normal text-slate-500">(first 6 periods)</span></h3>
+                        <button onclick="exportChartPNG(utilChart,'utilization_by_machine.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <div class="flex gap-3 items-center mb-3 text-xs text-slate-400">
                         <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgb(255,199,206)"></span> &gt;100%</span>
                         <span class="flex items-center gap-1"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgb(255,200,150)"></span> &lt;30%</span>
@@ -260,7 +263,10 @@
                     <canvas id="utilChart" height="220"></canvas>
                 </div>
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-4">FTE Requirements by Group</h3>
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold">FTE Requirements by Group</h3>
+                        <button onclick="exportChartPNG(fteChart,'fte_requirements.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <canvas id="fteChart" height="220"></canvas>
                 </div>
             </div>
@@ -294,24 +300,36 @@
             <!-- Financial Metrics + ROCE Row -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mt-4 lg:mt-6">
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-4">Projected Financial Metrics <span class="text-xs font-normal text-slate-500">(000s EUR)</span></h3>
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold">Projected Financial Metrics <span class="text-xs font-normal text-slate-500">(000s EUR)</span></h3>
+                        <button onclick="exportChartPNG(financialChart,'projected_financial_metrics.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <canvas id="financialChart" height="220"></canvas>
                 </div>
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-1">Monthly ROCE %
-                        <span class="text-xs font-normal text-slate-500 ml-2">— 15% target</span>
-                    </h3>
+                    <div class="flex items-center justify-between mb-1">
+                        <h3 class="font-semibold">Monthly ROCE %
+                            <span class="text-xs font-normal text-slate-500 ml-2">— 15% target</span>
+                        </h3>
+                        <button onclick="exportChartPNG(roceChart,'monthly_roce.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <canvas id="roceChart" height="220"></canvas>
                 </div>
             </div>
             <!-- Demand Trend + Inventory vs Target Row -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mt-4 lg:mt-6">
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-4">Total Demand Trend</h3>
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold">Total Demand Trend</h3>
+                        <button onclick="exportChartPNG(window._demandTrendChart,'total_demand_trend.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <canvas id="demandTrendChart" height="220"></canvas>
                 </div>
                 <div class="card rounded-xl p-6">
-                    <h3 class="font-semibold mb-4">Inventory vs Target Stock</h3>
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold">Inventory vs Target Stock</h3>
+                        <button onclick="exportChartPNG(window._invTargetChart,'inventory_vs_target_stock.png')" class="px-3 py-1 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded">↓ Export as PNG</button>
+                    </div>
                     <canvas id="invTargetChart" height="220"></canvas>
                 </div>
             </div>
@@ -892,12 +910,16 @@ function buildPeriodLabels(planningMonthVal, forecastMonths) {
     return labels;
 }
 
-function exportTop10PNG() {
-    if (!overstocksChart) return;
+function exportChartPNG(chartInstance, filename) {
+    if (!chartInstance) return;
     const a = document.createElement('a');
-    a.href = overstocksChart.toBase64Image();
-    a.download = 'top10_overstocks.png';
+    a.href = chartInstance.toBase64Image();
+    a.download = filename;
     a.click();
+}
+
+function exportTop10PNG() {
+    exportChartPNG(overstocksChart, 'top10_overstocks.png');
 }
 
 function renderTop10Overstocks(top10) {
