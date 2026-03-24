@@ -462,23 +462,28 @@ class CapacityEngine:
             ))
 
     def _calculate_shift_availability(self):
-        """Line 11: Shift Availability per machine group."""
+        """Line 11: Shift Availability per machine group.
+
+        NOTE: VBA MachineGroupShiftAvailability() assigns the same shift system to ALL groups,
+        defaulting to FTE sheet row 4 (second dropdown option). Python overrides per-machine
+        derivation here to match that behaviour so test comparisons against the Excel reference
+        are accurate. This is a known deviation from the semantically correct approach (deriving
+        shift system per group from machine configuration) and should be revisited when the
+        per-group shift system selection is properly modelled.
+        """
         print("  [11] Calculating Shift Availability...")
+        # VBA default: all groups use the same shift system (FTE sheet row 4 = second option)
+        grp_shift_name = getattr(self.data, 'default_shift_name', '3-shift system')
+        grp_shift_hours = self.shift_hours_lookup.get(grp_shift_name, 520.0)
+
         for group_id in self.all_groups:
             group = self.data.machine_groups.get(group_id)
             machine_names = []
-            # Determine shift hours from the first non-unlimited machine in the group
-            grp_shift_hours = self.shift_hours_lookup.get('2-shift system', 520.0)
-            grp_shift_name = '2-shift system'
             if group:
                 for mc in group.machine_codes:
                     m = self.data.machines.get(mc)
                     if m:
                         machine_names.append(m.machine_code)
-                        if m.shift_system != ShiftSystem.UNLIMITED:
-                            grp_shift_hours = self._get_shift_hours_for_machine(mc)
-                            grp_shift_name = self._get_shift_system_name(mc)
-                            break
             annual_hours = grp_shift_hours * 12
             self.group_monthly_shift_hours[group_id] = grp_shift_hours
             aux2_str = (str(int(annual_hours))

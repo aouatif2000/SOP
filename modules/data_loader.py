@@ -39,6 +39,7 @@ class DataLoader:
 
         self.fte_hours_per_year: float = 1492
         self.shift_hours: Dict[str, float] = {}
+        self.default_shift_name: str = '3-shift system'  # VBA default: FTE sheet row 4 (second dropdown option)
         self.purchase_lead_times: Dict[str, int] = {}
         self.purchase_moq: Dict[str, float] = {}
         self.purchase_actuals: Dict[str, Dict[str, float]] = {}
@@ -145,6 +146,7 @@ class DataLoader:
     def _load_fte_config(self):
         try:
             df = pd.read_excel(self.excel_file, sheet_name='FTE sheet')
+            shift_entries_ordered = []
             for _, row in df.iterrows():
                 type_val = str(row.get('Type', '')).strip()
                 hours = row.get('Hours per year')
@@ -153,13 +155,22 @@ class DataLoader:
                         self.fte_hours_per_year = float(hours)
                     elif '2-shift' in type_val.lower():
                         self.shift_hours['2-shift system'] = float(hours) / 12
+                        shift_entries_ordered.append('2-shift system')
                     elif '3-shift' in type_val.lower():
                         self.shift_hours['3-shift system'] = float(hours) / 12
+                        shift_entries_ordered.append('3-shift system')
                     elif '24/7' in type_val.lower():
                         self.shift_hours['24/7 production'] = float(hours) / 12
+                        shift_entries_ordered.append('24/7 production')
+            # VBA MachineGroupShiftAvailability: default AUX1 = FTE sheet row 4 = second dropdown option
+            # (dropdown lists shift entries starting from row 3; row 4 is index 1 = second shift entry)
+            if len(shift_entries_ordered) >= 2:
+                self.default_shift_name = shift_entries_ordered[1]
+            elif len(shift_entries_ordered) == 1:
+                self.default_shift_name = shift_entries_ordered[0]
             if '3-shift system' not in self.shift_hours:
                 self.shift_hours['3-shift system'] = 520
-            print(f"  FTE config: {self.fte_hours_per_year} hours/year")
+            print(f"  FTE config: {self.fte_hours_per_year} hours/year, default shift: {self.default_shift_name}")
         except Exception as e:
             print(f"  FTE config warning: {e}")
             self.shift_hours = {'3-shift system': 520}
@@ -190,7 +201,7 @@ class DataLoader:
                 time_per_truck=float(row.get('Time per truck')) if pd.notna(row.get('Time per truck')) else None,
                 control_room=int(row.get('Control Room', 0)) if pd.notna(row.get('Control Room')) else 0,
                 default_inventory_value=self._safe_float(row.get('Default inventory value', 0)),
-                is_active=row.get('Active', 1) == 1,
+                is_active=(row.get('Active', 1) if pd.notna(row.get('Active', 1)) else 1) == 1,
                 product_type_raw=product_type_str,
             )
         print(f"  Materials: {len(self.materials)}")
@@ -641,7 +652,7 @@ class DataLoader:
     def get_lead_time(self, mat_num):
         if mat_num in self.purchase_lead_times:
             return self.purchase_lead_times[mat_num]
-        return 0  # VBA default: no lead time delay if not in purchase sheet
+        return 1  # VBA IFERROR default: Purchase Plan aux formula returns 1 when material not in Purchase sheet
 
     def get_bom_for_parent(self, parent):
         return [b for b in self.bom if b.parent_material == parent and not b.is_coproduct]

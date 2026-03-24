@@ -177,6 +177,17 @@ class PlanningEngine:
             for mat_num in materials_at_level:
                 material = self.data.materials.get(mat_num)
                 if not material:
+                    # VBA creates Line 02 from BOM data directly — no Material Master
+                    # required. Still emit Line 02 for BOM children missing from MatMas.
+                    mat_dep_by_parent = dict(dep_demand_by_parent.get(mat_num, {}))
+                    if mat_dep_by_parent:
+                        dd_rows = bom_engine.create_dependent_demand_rows(
+                            mat_num, mat_dep_by_parent
+                        )
+                        self.results[LineType.DEPENDENT_DEMAND.value].extend(dd_rows)
+                    continue
+
+                if not material.is_active:
                     continue
 
                 mat_forecast = forecasts.get(mat_num, {})
@@ -234,7 +245,9 @@ class PlanningEngine:
 
         standalone_mats = [
             mat_num for mat_num in self.data.safety_stock
-            if mat_num not in bom_processed and mat_num in self.data.materials
+            if mat_num not in bom_processed
+            and mat_num in self.data.materials
+            and self.data.materials[mat_num].is_active
         ]
 
         if standalone_mats:

@@ -98,3 +98,10 @@ Rate = Hours_Used / Hours_Available
 ### FTE Requirements (Line 12)
 ```
 FTE = Total_Hours / (FTE_Hours_Per_Year / 12)
+```
+
+---
+
+## Bug Fixes
+
+See [FIXES.md](FIXES.md) for a full description of all bugs found and resolved, including root cause analysis and code references.

@@ -193,41 +193,43 @@ class InventoryEngine:
                 else:
                     break  # heuristic values kept for remaining months
 
-            # Re-run production plan heuristic for months at and after the frozen
-            # period, using the corrected running_stock from actuals.
-            if is_purchased_and_produced and production_plan is not None:
-                running_stock = initial_stock
-                # Advance running_stock through frozen months using actual purchases
-                for i, period in enumerate(self.periods):
-                    if i >= lead_time:
-                        break
-                    demand  = total_demand.get(period, 0.0)
-                    prod    = production_plan.get(period, 0.0)
-                    purch   = purchase_receipt.get(period, 0.0)   # now = actuals
-                    running_stock = running_stock - demand + prod + purch
+            # Re-run: rebuild running_stock from scratch and recalculate heuristic
+            # for all periods not locked by actuals.
+            # - Frozen (i < lead_time): keep actuals, advance running_stock
+            # - First-flexible (i == lead_time) with actual > 0: keep actual, advance
+            # - First-flexible with actual == 0 OR beyond: recompute heuristic
+            # This mirrors Excel's live-formula recalculation after ProcessPurchaseReceipts.
+            running_stock = initial_stock
+            for i, period in enumerate(self.periods):
+                demand = total_demand.get(period, 0.0)
+                raw_need = target_values[period] - running_stock + demand
+                prod_qty = 0.0
+                purch_qty = 0.0
 
-                # Recalculate production plan from lead_time onwards
-                for i, period in enumerate(self.periods):
-                    if i < lead_time:
-                        continue
-                    demand    = total_demand.get(period, 0.0)
-                    raw_need  = target_values[period] - running_stock + demand
-                    prod_qty  = 0.0
-                    purch_qty = 0.0
-                    if raw_need > 0:
-                        prod_need = raw_need * production_fraction_config
-                        if prod_need > 0:
-                            prod_qty = ceiling_multiple(prod_need, bom_header_qty)
-                            prod_qty = max(prod_qty, min_prod_qty)
-                        purch_need = raw_need - prod_qty
-                        if purch_need > 0 and i >= lead_time:
-                            purch_qty = ceiling_multiple(
-                                purch_need, self.data.get_purchase_moq(mat_num))
-                    production_plan[period] = prod_qty
-                    if i >= lead_time:
+                if i < lead_time or (i == lead_time and actuals_map.get(period, 0.0) > 0):
+                    # Frozen or first-flexible locked by actual: keep actuals-set value
+                    prod_qty = production_plan.get(period, 0.0) if production_plan else 0.0
+                    purch_qty = purchase_receipt.get(period, 0.0)
+                else:
+                    # First-flexible with no actual, or beyond: run heuristic
+                    if is_purchased_and_produced and production_plan is not None:
+                        if raw_need > 0:
+                            prod_need = raw_need * production_fraction_config
+                            if prod_need > 0:
+                                prod_qty = ceiling_multiple(prod_need, bom_header_qty)
+                                prod_qty = max(prod_qty, min_prod_qty)
+                            purch_need = raw_need - prod_qty
+                            if purch_need > 0:
+                                purch_qty = ceiling_multiple(
+                                    purch_need, self.data.get_purchase_moq(mat_num))
+                        production_plan[period] = prod_qty
                         purchase_receipt[period] = purch_qty
-                    running_stock = running_stock - demand + prod_qty + \
-                        purchase_receipt.get(period, 0.0)
+                    elif needs_purchase:
+                        if raw_need > 0:
+                            purch_qty = ceiling_multiple(raw_need, purch_ceil_multiple)
+                        purchase_receipt[period] = purch_qty
+
+                running_stock = running_stock - demand + prod_qty + purch_qty
 
         # === Create Line 06 rows ===
         if production_plan is not None:
