@@ -48,13 +48,14 @@ def _save_sessions_to_disk():
         serializable = {}
         for sid, sess in sessions.items():
             serializable[sid] = {
-                'id':          sess.get('id', sid),
-                'file_path':   sess.get('file_path', ''),
-                'filename':    sess.get('filename', ''),
-                'custom_name': sess.get('custom_name'),
-                'metadata':    sess.get('metadata', {}),
-                'uploaded_at': sess.get('uploaded_at', ''),
-                'parameters':  sess.get('parameters'),
+                'id':           sess.get('id', sid),
+                'file_path':    sess.get('file_path', ''),
+                'filename':     sess.get('filename', ''),
+                'custom_name':  sess.get('custom_name'),
+                'metadata':     sess.get('metadata', {}),
+                'uploaded_at':  sess.get('uploaded_at', ''),
+                'parameters':   sess.get('parameters'),
+                'pending_edits': sess.get('pending_edits', {}),
             }
         store = {
             'active_session_id': active_session_id,
@@ -76,17 +77,18 @@ def _load_sessions_from_disk():
             store = json.load(f)
         for sid, data in store.get('sessions', {}).items():
             sessions[sid] = {
-                'id':           data.get('id', sid),
-                'file_path':    data.get('file_path', ''),
-                'filename':     data.get('filename', ''),
-                'custom_name':  data.get('custom_name'),
-                'engine':       None,   # must re-calculate after restart
+                'id':            data.get('id', sid),
+                'file_path':     data.get('file_path', ''),
+                'filename':      data.get('filename', ''),
+                'custom_name':   data.get('custom_name'),
+                'engine':        None,   # must re-calculate after restart
                 'value_results': {},
-                'metadata':     data.get('metadata', {}),
-                'uploaded_at':  data.get('uploaded_at', ''),
-                'parameters':   data.get('parameters'),
-                'undo_stack':   [],
-                'redo_stack':   [],
+                'metadata':      data.get('metadata', {}),
+                'uploaded_at':   data.get('uploaded_at', ''),
+                'parameters':    data.get('parameters'),
+                'pending_edits': data.get('pending_edits', {}),
+                'undo_stack':    [],
+                'redo_stack':    [],
             }
         saved_active = store.get('active_session_id')
         if saved_active and saved_active in sessions:
@@ -164,6 +166,7 @@ def upload_file():
         }
         sessions[session_id]['undo_stack'] = []
         sessions[session_id]['redo_stack'] = []
+        sessions[session_id]['pending_edits'] = {}
         active_session_id = session_id
         _save_sessions_to_disk()
 
@@ -708,6 +711,46 @@ def _apply_edit_highlights(path: str, engine):
 @app.route('/api/editable_line_types')
 def get_editable_line_types():
     return jsonify({'editable': sorted(EDITABLE_LINE_TYPES)})
+
+
+@app.route('/api/sessions/edits/persist', methods=['POST'])
+def persist_session_edit():
+    """Save a single cell edit into the session's persistent pending_edits store."""
+    req = request.get_json() or {}
+    session_id = req.get('session_id', '')
+    if not session_id or session_id not in sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    key = req.get('key', '').strip()
+    if not key:
+        return jsonify({'error': 'Cell key required'}), 400
+    original = float(req.get('original', 0))
+    new_value = float(req.get('new_value', 0))
+    pending = sessions[session_id].setdefault('pending_edits', {})
+    if abs(new_value - original) < 0.0001:
+        pending.pop(key, None)   # edit reverted to original — remove entry
+    else:
+        pending[key] = {'original': original, 'new_value': new_value}
+    _save_sessions_to_disk()
+    return jsonify({'success': True})
+
+
+@app.route('/api/sessions/edits/sync', methods=['POST'])
+def sync_session_edits():
+    """Replace the entire pending_edits store for a session (used after undo/redo/reset/import)."""
+    req = request.get_json() or {}
+    session_id = req.get('session_id', '')
+    if not session_id or session_id not in sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    edits = req.get('edits', {})
+    if not isinstance(edits, dict):
+        return jsonify({'error': 'edits must be an object'}), 400
+    sessions[session_id]['pending_edits'] = {
+        k: {'original': float(v.get('original', 0)), 'new_value': float(v.get('new_value', 0))}
+        for k, v in edits.items()
+        if isinstance(v, dict)
+    }
+    _save_sessions_to_disk()
+    return jsonify({'success': True})
 
 
 @app.route('/api/update_volume', methods=['POST'])
@@ -1666,6 +1709,7 @@ def switch_session():
         'custom_name': sess.get('custom_name'),
         'metadata': sess.get('metadata', {}),
         'calculated': sess.get('engine') is not None,
+        'pending_edits': sess.get('pending_edits', {}),
     })
 
 
@@ -1685,6 +1729,8 @@ def delete_session(session_id):
 _SESSION_SAVE_PATHS = {
     '/api/sessions/rename',
     '/api/sessions/switch',
+    '/api/sessions/edits/persist',
+    '/api/sessions/edits/sync',
     '/api/upload',
     '/api/calculate',
     '/api/update_volume',

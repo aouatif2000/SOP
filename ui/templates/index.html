@@ -459,7 +459,7 @@
     <!-- Tooltip element (shared, positioned via JS) -->
     <div id="planTooltip"></div>
 <script>
-let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], cellEdits: {}, top10Overstocks: [] };
+let state = { periods: [], results: null, lineTypes: [], valueResults: null, valueLineTypes: [], consolidation: [], cellEdits: {}, top10Overstocks: [], activeSessionId: null };
 let utilChart = null;
 let fteChart = null;
 let overstocksChart = null;
@@ -564,7 +564,23 @@ async function runCalc() {
 async function loadResults() {
     const res = await fetch('/api/results'); const data = await res.json();
     state.results = data.results; state.periods = data.periods; state.lineTypes = Object.keys(data.results).sort();
+    // Rebuild cellEdits from the loaded session's manual_edits to keep edit state isolated per session
+    state.cellEdits = {};
+    for (const [lt, rows] of Object.entries(state.results)) {
+        for (const row of rows) {
+            if (row.manual_edits && Object.keys(row.manual_edits).length > 0) {
+                for (const [p, editData] of Object.entries(row.manual_edits)) {
+                    const key = `${row.line_type}||${row.material_number}||${row.aux_column||''}||${p}`;
+                    const orig = editData.original;
+                    const nv = editData.new;
+                    const dp = orig !== 0 ? parseFloat(((nv - orig) / Math.abs(orig) * 100).toFixed(2)) : 0;
+                    state.cellEdits[key] = { original: orig, new: nv, delta_pct: dp };
+                }
+            }
+        }
+    }
     updateHorizonDisplay(); updateDashboard(); renderPlanningTable(state.results, state.periods); loadCapacityData(); loadInventoryData();
+    updateEditBadge();
     refreshScenarioDrop();
 }
 
@@ -1332,10 +1348,33 @@ async function _commitPlanEdit(cell, matNum, lt, period, newValue, origVal, key)
         state.results = data.results; state.valueResults = data.value_results; state.consolidation = data.consolidation;
         state.cellEdits[key] = { original: data.edit_meta.old_value, new: data.edit_meta.new_value, delta_pct: data.edit_meta.delta_pct };
         cell.dataset.original = String(newValue);
+        // Persist this edit to the server so it survives page refresh and session switches
+        if (state.activeSessionId) {
+            const auxCol = key.split('||')[2] || '';
+            const rowData = data.results[lt] && data.results[lt].find(r => r.material_number === matNum && (r.aux_column || '') === auxCol);
+            const editEntry = rowData && rowData.manual_edits && rowData.manual_edits[period];
+            const trueOriginal = editEntry ? editEntry.original : data.edit_meta.old_value;
+            fetch('/api/sessions/edits/persist', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: state.activeSessionId, key, original: trueOriginal, new_value: data.edit_meta.new_value })
+            }).catch(() => {});
+        }
         updateTableFromResults(data.results, data.value_results);
         _markAutoSaved();
         renderDashboard();
     } catch(err) { alert('Error: ' + err); cell.textContent = fmt(origVal); }
+}
+
+function _syncPendingEditsToServer() {
+    if (!state.activeSessionId) return;
+    const edits = {};
+    for (const [k, v] of Object.entries(state.cellEdits)) {
+        edits[k] = { original: v.original, new_value: v.new };
+    }
+    fetch('/api/sessions/edits/sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: state.activeSessionId, edits })
+    }).catch(() => {});
 }
 
 function updateTableFromResults(results, valueResults) {
@@ -1482,6 +1521,7 @@ async function loadEditsJSON(event) {
             }
         }
         refreshAllTabs();
+        _syncPendingEditsToServer();
         log('Edits JSON loaded: ' + (parsed.edits ? parsed.edits.length : 0) + ' edits applied');
     } catch (err) { alert('Import error: ' + err); }
 }
@@ -1497,6 +1537,7 @@ async function resetAllEdits() {
             state.valueResults = data.value_results;
             state.cellEdits = {};
             updateEditBadge();
+            _syncPendingEditsToServer();
             renderPlanningTable(state.results, state.periods);
             updateTableFromResults(data.results, null);
             if (data.consolidation) updateConsolidation(data.consolidation);
@@ -1517,6 +1558,7 @@ async function undoEdit() {
         const data = await res.json();
         if (data.error) { log('Undo: ' + data.error); return; }
         _applyVolumeChangeResult(data);
+        _syncPendingEditsToServer();
         log('Undo applied.');
         _markAutoSaved();
     } catch (err) { log('Undo error: ' + err); }
@@ -1529,6 +1571,7 @@ async function redoEdit() {
         const data = await res.json();
         if (data.error) { log('Redo: ' + data.error); return; }
         _applyVolumeChangeResult(data);
+        _syncPendingEditsToServer();
         log('Redo applied.');
         _markAutoSaved();
     } catch (err) { log('Redo error: ' + err); }
@@ -1887,6 +1930,7 @@ async function _doUpload(file) {
             document.getElementById('monthsForecast').value = data.months_forecast;
         }
         updateHorizonDisplay();
+        state.activeSessionId = data.session_id;
         log('Raw data loaded: ' + data.filename + (data.planning_month ? ' | Planning month: ' + data.planning_month : ''));
         _markAutoSaved();
         status('Click Calculate');
@@ -1905,6 +1949,7 @@ async function loadSessions() {
     try {
         const res = await fetch('/api/sessions');
         const data = await res.json();
+        if (data.active_session_id) state.activeSessionId = data.active_session_id;
         renderSessionList(data.groups || {}, data.active_session_id);
     } catch (err) { /* silent on load */ }
 }
@@ -1984,6 +2029,15 @@ async function switchSession(sessionId) {
         document.getElementById('kpi-mat').textContent = m.materials || '-';
         document.getElementById('kpi-bom').textContent = m.bom_items || '-';
         document.getElementById('calcBtn').disabled = false;
+        state.activeSessionId = data.active_session_id;
+        // Seed cellEdits from the session's persistent store before loadResults() overrides with engine data
+        state.cellEdits = {};
+        for (const [k, v] of Object.entries(data.pending_edits || {})) {
+            const orig = v.original, nv = v.new_value;
+            const dp = orig !== 0 ? parseFloat(((nv - orig) / Math.abs(orig) * 100).toFixed(2)) : 0;
+            state.cellEdits[k] = { original: orig, new: nv, delta_pct: dp };
+        }
+        updateEditBadge();
         if (data.calculated) {
             await loadResults();
             await loadValueResults();
