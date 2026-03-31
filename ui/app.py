@@ -103,6 +103,88 @@ def _load_sessions_from_disk():
 _load_sessions_from_disk()
 
 
+def _replay_pending_edits(sess, engine):
+    """Re-apply saved pending_edits onto a freshly-run engine.
+
+    pending_edits keys are "line_type||material_number||aux_column||period".
+    Only value rows need to be updated here (no cascade); value planning is
+    re-calculated once after all edits are applied.
+    """
+    pending = sess.get('pending_edits', {})
+    if not pending:
+        return
+    applied = 0
+    for key, edit in pending.items():
+        try:
+            parts = key.split('||')
+            if len(parts) != 4:
+                continue
+            lt, mat, _aux, period = parts
+            new_val = float(edit.get('new_value', 0))
+            original = float(edit.get('original', 0))
+            rows = engine.results.get(lt, [])
+            target = next((r for r in rows if r.material_number == mat), None)
+            if target is None:
+                continue
+            target.manual_edits[period] = {'original': original, 'new': new_val}
+            target.set_value(period, new_val)
+            applied += 1
+        except Exception:
+            pass
+    if applied:
+        from modules.value_planning_engine import ValuePlanningEngine
+        engine.value_engine = ValuePlanningEngine(engine.data, engine.results)
+        engine.value_results = engine.value_engine.calculate()
+        print(f'[autorun]   replayed {applied} pending edit(s)')
+
+
+def _autorun_sessions():
+    """Background thread: re-execute the planning engine for every session that
+    was previously run (identified by a non-None 'parameters' field).
+
+    Runs silently and does not block server startup.
+    """
+    import threading
+
+    def _worker():
+        candidates = [
+            (sid, sess) for sid, sess in sessions.items()
+            if sess.get('parameters') is not None and Path(sess.get('file_path', '')).exists()
+        ]
+        if not candidates:
+            print('[autorun] No sessions to restore.')
+            return
+        print(f'[autorun] Restoring {len(candidates)} session(s) in the background…')
+        for sid, sess in candidates:
+            label = sess.get('custom_name') or sess.get('filename', sid)
+            try:
+                params = sess['parameters']
+                planning_month  = params.get('planning_month')
+                months_actuals  = int(params.get('months_actuals', 0) or 0)
+                months_forecast = int(params.get('months_forecast', 12) or 12)
+                print(f'[autorun] Running "{label}" '
+                      f'(pm={planning_month}, act={months_actuals}, fc={months_forecast})…')
+                engine = PlanningEngine(
+                    sess['file_path'],
+                    planning_month=planning_month,
+                    months_actuals=months_actuals,
+                    months_forecast=months_forecast,
+                )
+                engine.run()
+                _replay_pending_edits(sess, engine)
+                sess['engine'] = engine
+                print(f'[autorun] ✓ "{label}" restored '
+                      f'({sum(len(v) for v in engine.results.values())} rows)')
+            except Exception as exc:
+                print(f'[autorun] ✗ "{label}" failed: {exc}')
+
+    t = threading.Thread(target=_worker, name='autorun-sessions', daemon=True)
+    t.start()
+
+
+_autorun_sessions()
+
+
 def _get_active():
     """Return (session_dict, engine) for the active session, or (None, None)."""
     sess = sessions.get(active_session_id)
