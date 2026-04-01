@@ -294,6 +294,21 @@ def run_calculations():
         print(f"  Months of Actuals: {months_actuals}")
         print(f"  Months of Forecast: {months_forecast}")
 
+        # --- MoM: preserve the previous results BEFORE running the new calculation ---
+        # If the active session already has an engine, save its results as the
+        # "previous cycle" snapshot so MoM compares new vs. old (not new vs. new).
+        # If there is no previous snapshot at all (very first calculation ever),
+        # bootstrap one after running so the user only needs one calculation to
+        # enable MoM on the next run.
+        _existing_engine = sess.get('engine')
+        _bootstrap_snapshot = (_existing_engine is None and not _cycle_manager.has_previous_cycle())
+        if _existing_engine is not None:
+            try:
+                _cycle_manager.save_current_as_previous(_existing_engine.to_dataframe())
+                print('[cycle_manager] pre-run: saved existing engine as previous cycle snapshot')
+            except Exception as _cm_exc:
+                print(f'[cycle_manager] pre-run snapshot warning: {_cm_exc}')
+
         engine = PlanningEngine(
             sess['file_path'],
             planning_month=planning_month,
@@ -308,12 +323,15 @@ def run_calculations():
             'months_forecast': months_forecast,
         }
 
-        # --- Save current results as previous-cycle snapshot for MoM ---
-        try:
-            current_df = engine.to_dataframe()
-            _cycle_manager.save_current_as_previous(current_df)
-        except Exception as _cm_exc:
-            print(f'[cycle_manager] snapshot save warning: {_cm_exc}')
+        # --- MoM bootstrap: on the very first calculation ever, seed the snapshot ---
+        # (so MoM becomes available after the second calculation without needing
+        # to calculate twice in the same app session)
+        if _bootstrap_snapshot:
+            try:
+                _cycle_manager.save_current_as_previous(engine.to_dataframe())
+                print('[cycle_manager] bootstrap: saved first-ever snapshot')
+            except Exception as _cm_exc:
+                print(f'[cycle_manager] bootstrap snapshot warning: {_cm_exc}')
 
         _save_sessions_to_disk()
 
@@ -421,7 +439,11 @@ def get_dashboard():
     financials = {}
     for row in current_engine.value_results.get(LineType.CONSOLIDATION.value, []):
         key = row.material_number.replace('ZZZZZZ_', '')
-        financials[key] = {p: round(v, 0) for p, v in row.values.items()}
+        # ROCE is a ratio (e.g. 0.042 = 4.2%) — preserve precision so the
+        # frontend can multiply by 100.  All other P&L rows are large EUR
+        # amounts that round cleanly to 0 decimal places.
+        decimals = 6 if key == 'ROCE' else 0
+        financials[key] = {p: round(v, decimals) for p, v in row.values.items()}
 
     # ── inventory quality (graceful degradation if fix #10 not applied) ─────
     inventory_quality: list = []

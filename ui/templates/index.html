@@ -486,17 +486,18 @@ function updateHorizonDisplay() {
     const forecast = Math.max(0, parseInt(document.getElementById('monthsForecast').value) || 0);
     const banner = document.getElementById('horizonBanner');
     const horizonEl = document.getElementById('horizonText');
-    if (!pmVal) { banner.classList.add('hidden'); return; }
-    const [yr, mo] = pmVal.split('-').map(Number);
+    const periods = state.periods;
+    // Hide only if there is neither a planning month nor any loaded periods to derive from
+    if (!pmVal && (!periods || periods.length === 0)) { banner.classList.add('hidden'); return; }
 
     // Primary: derive start/end from the actual periods array in the loaded results
     let startDate, endDate;
-    const periods = state.periods;
     if (periods && periods.length > 0) {
         startDate = new Date(periods[0] + '-01');
         endDate   = new Date(periods[periods.length - 1] + '-01');
     } else {
-        // Fallback: mathematical derivation from header fields
+        // Fallback: mathematical derivation from header fields (pmVal guaranteed set here)
+        const [yr, mo] = pmVal.split('-').map(Number);
         // Start = planning_month minus actuals → first actuals month
         const startOffset = actuals;
         startDate = new Date(yr, mo - 1 - startOffset, 1);
@@ -1057,6 +1058,10 @@ function renderInvTargetChart(periods, inventoryTrend, targetTrend) {
     const canvas = document.getElementById('invTargetChart');
     if (!canvas) return;
     if (window._invTargetChart) window._invTargetChart.destroy();
+    const invVals = periods.map(p => inventoryTrend[p] || 0);
+    const tgtVals = periods.map(p => targetTrend[p] || 0);
+    const allVals = [...invVals, ...tgtVals].filter(v => v > 0);
+    const yMin = allVals.length ? Math.floor(Math.min(...allVals) * 0.92) : 0;
     window._invTargetChart = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
@@ -1064,20 +1069,47 @@ function renderInvTargetChart(periods, inventoryTrend, targetTrend) {
             datasets: [
                 {
                     label: 'Inventory',
-                    data: periods.map(p => inventoryTrend[p] || 0),
-                    borderColor: 'rgba(59,130,246,0.9)',
-                    tension: 0.3, pointRadius: 2,
+                    data: invVals,
+                    borderColor: 'rgba(59,130,246,1)',
+                    backgroundColor: 'rgba(59,130,246,0.12)',
+                    borderWidth: 2,
+                    tension: 0.3,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    fill: false,
                 },
                 {
                     label: 'Target stock',
-                    data: periods.map(p => targetTrend[p] || 0),
-                    borderColor: 'rgba(249,115,22,0.9)',
-                    borderDash: [6, 3],
-                    tension: 0.3, pointRadius: 2,
+                    data: tgtVals,
+                    borderColor: 'rgba(251,191,36,1)',
+                    backgroundColor: 'rgba(251,191,36,0.08)',
+                    borderDash: [7, 4],
+                    borderWidth: 2,
+                    tension: 0.3,
+                    pointRadius: 4,
+                    pointStyle: 'triangle',
+                    pointHoverRadius: 6,
+                    fill: false,
                 }
             ]
         },
-        options: { responsive: true, scales: { y: { beginAtZero: false } } }
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('fr-FR')}` } }
+            },
+            scales: {
+                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } },
+                y: {
+                    min: yMin,
+                    beginAtZero: false,
+                    grid: { color: '#334155' },
+                    ticks: { color: '#94a3b8', callback: v => Math.round(v).toLocaleString('fr-FR') }
+                }
+            }
+        }
     });
 }
 
@@ -1951,13 +1983,31 @@ async function loadSessions() {
         const data = await res.json();
         if (data.active_session_id) state.activeSessionId = data.active_session_id;
         renderSessionList(data.groups || {}, data.active_session_id);
+        // On first page load, if the active session is already calculated, restore it
+        // so dashboard charts and tables are populated without needing to click Calculate.
+        if (data.active_session_id && state.results === null) {
+            let activeSess = null;
+            for (const grp of Object.values(data.groups || {})) {
+                activeSess = grp.find(s => s.id === data.active_session_id) || activeSess;
+            }
+            if (activeSess && activeSess.calculated) {
+                await switchSession(data.active_session_id);
+            }
+        }
     } catch (err) { /* silent on load */ }
 }
 
 function renderSessionList(groups, activeId) {
     const container = document.getElementById('sessionList');
     if (!container) return;
-    const keys = Object.keys(groups).sort().reverse(); // newest first
+    const keys = Object.keys(groups).sort((a, b) => {
+        const [ay, am] = a.split('/');
+        const [by, bm] = b.split('/');
+        const aNum = parseInt(ay || '0') * 100 + parseInt(am || '0');
+        const bNum = parseInt(by || '0') * 100 + parseInt(bm || '0');
+        if (bNum !== aNum) return bNum - aNum; // descending by planning month
+        return a.localeCompare(b); // tie-break by site name
+    });
     if (keys.length === 0) {
         container.innerHTML = '<p style="padding:16px;color:#475569;font-size:12px;text-align:center">No files loaded yet</p>';
         return;
@@ -2041,6 +2091,7 @@ async function switchSession(sessionId) {
         if (data.calculated) {
             await loadResults();
             await loadValueResults();
+            await renderDashboard();
             document.getElementById('exportBtn').disabled = false;
             document.getElementById('exportDbBtn').disabled = false;
             document.getElementById('momBtn').disabled = false;

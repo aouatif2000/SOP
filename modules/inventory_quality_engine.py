@@ -107,6 +107,11 @@ class InventoryQualityEngine:
 
             mat = self.data.materials.get(mat_num)
             overstock_by_period = {p: periods_data[p]['overstock'] for p in self.periods}
+            # Include starting-stock period: compute overstock from the row's
+            # starting_stock value (unrestricted stock) using the same VBA formula.
+            starting_inv = getattr(row, 'starting_stock', 0.0) or 0.0
+            starting_overstock = max(0.0, starting_inv - target_val - lot_val)
+            overstock_by_period['Starting stock'] = round(starting_overstock, 2)
             per_material.append({
                 'material_number': mat_num,
                 'material_name': mat.name if mat else '',

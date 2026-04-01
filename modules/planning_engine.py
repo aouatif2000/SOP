@@ -520,10 +520,8 @@ class PlanningEngine:
                 self._apply_excel_formatting(wb['Values_Planning sheet'], is_values_sheet=True)
                 self._apply_consol_colors(wb['Values_Planning sheet'])
 
-            # Freeze header row and metadata columns (VBA: freeze above row 2, left of col L)
-            wb['Planning sheet'].freeze_panes = 'L2'
             if 'Values_Planning sheet' in wb.sheetnames:
-                wb['Values_Planning sheet'].freeze_panes = 'L2'
+                pass  # no freeze panes
 
             # ---- High-level overview sheet (VBA CreateHighLevelOverview line 2804) ----
             from openpyxl.chart import BarChart, LineChart, Reference
