@@ -281,7 +281,11 @@ class ValuePlanningEngine:
     # ------------------------------------------------------------------
     # 6. FTE Requirements → Direct FTE cost
     # VBA: ALL FTE rows are copied. AUX = Direct FTE cost per month (val param #1)
+    # Truck materials (ZZZZ_TRUCK01/02): VBA TruckOperationsFormulas uses
+    #   FTE = CapacityUtilization * TimePerTruck / TonPerTruck
     # ------------------------------------------------------------------
+    _TRUCK_MATERIALS = {'ZZZZ_TRUCK01', 'ZZZZ_TRUCK02'}
+
     def _convert_fte_requirements(self):
         print("\n[6] Converting FTE requirements to direct FTE cost...")
         if not self.data.valuation_params:
@@ -289,9 +293,33 @@ class ValuePlanningEngine:
             return
         rows = self.planning_results.get(LineType.FTE_REQUIREMENTS.value, [])
         fte_cost = self.data.valuation_params.direct_fte_cost_per_month
+
+        # Build lookup for truck capacity utilization rows (needed for truck FTE formula)
+        cap_util_by_mat = {}
+        for r in self.planning_results.get(LineType.CAPACITY_UTILIZATION.value, []):
+            if r.material_number in self._TRUCK_MATERIALS:
+                cap_util_by_mat[r.material_number] = r
+
         converted = 0
         for row in rows:
-            vr = self._make_value_row(row, LineType.FTE_REQUIREMENTS.value, fte_cost)
+            if row.material_number in self._TRUCK_MATERIALS:
+                # VBA TruckOperationsFormulas: FTE = CapUtil * AuxColumn1 / AuxColumn2
+                # AuxColumn1 = TimePerTruck, AuxColumn2 = TonPerTruck
+                # (stored on the 07. Capacity utilization row for the same truck)
+                cap_row = cap_util_by_mat.get(row.material_number)
+                if cap_row:
+                    time_per_truck = float(cap_row.aux_column or 0)
+                    ton_per_truck = float(cap_row.aux_2_column or 0)
+                    vr = self._make_value_row(row, LineType.FTE_REQUIREMENTS.value, fte_cost)
+                    for p in self.periods:
+                        cap_util_val = cap_row.get_value(p)
+                        fte_val = (cap_util_val * time_per_truck / ton_per_truck
+                                   if ton_per_truck != 0 else 0.0)
+                        vr.set_value(p, fte_val * fte_cost)
+                else:
+                    vr = self._make_value_row(row, LineType.FTE_REQUIREMENTS.value, fte_cost)
+            else:
+                vr = self._make_value_row(row, LineType.FTE_REQUIREMENTS.value, fte_cost)
             self.value_results[LineType.FTE_REQUIREMENTS.value].append(vr)
             self._accum('direct_fte', vr)
             converted += 1
