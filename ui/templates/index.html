@@ -361,6 +361,7 @@
                             <option value="">&#8617; Load scenario…</option>
                         </select>
                         <button onclick="openCompareModal()" class="px-3 py-1 rounded text-sm bg-teal-700 hover:bg-teal-600 text-white" title="Compare two scenarios">&#9654;&#9654; Compare</button>
+                        <button onclick="openPapModal()" class="px-3 py-1 rounded text-sm bg-violet-700 hover:bg-violet-600 text-white" title="Manage production/purchase split fractions">&#9881; Prod/Purch Split</button>
                         <select id="ltFilter" onchange="filterTable()" class="bg-slate-700 rounded px-2 py-1 text-sm"></select>
                         <input id="matSearch" onkeyup="filterTable()" placeholder="Search..." class="bg-slate-700 rounded px-2 py-1 text-sm w-32">
                     </div>
@@ -1061,7 +1062,11 @@ function renderInvTargetChart(periods, inventoryTrend, targetTrend) {
     const invVals = periods.map(p => inventoryTrend[p] || 0);
     const tgtVals = periods.map(p => targetTrend[p] || 0);
     const allVals = [...invVals, ...tgtVals].filter(v => v > 0);
-    const yMin = allVals.length ? Math.floor(Math.min(...allVals) * 0.92) : 0;
+    // Rule of thirds: place the lowest data point at 1/3 height from the bottom.
+    // Formula: axisMin = (3 * dataMin - dataMax) / 2
+    const dataMin = allVals.length ? Math.min(...allVals) : 0;
+    const dataMax = allVals.length ? Math.max(...allVals) : 0;
+    const yMin = allVals.length ? Math.floor((3 * dataMin - dataMax) / 2) : 0;
     window._invTargetChart = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
@@ -1104,6 +1109,7 @@ function renderInvTargetChart(periods, inventoryTrend, targetTrend) {
                 x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', maxRotation: 30 } },
                 y: {
                     min: yMin,
+                    max: allVals.length ? Math.ceil(dataMax * 1.02) : undefined,
                     beginAtZero: false,
                     grid: { color: '#334155' },
                     ticks: { color: '#94a3b8', callback: v => Math.round(v).toLocaleString('fr-FR') }
@@ -1840,6 +1846,123 @@ document.addEventListener('keydown', function(e) {
     if (e.ctrlKey && e.key === 'y') { e.preventDefault(); redoEdit(); }
     if (e.ctrlKey && e.key === 'Z') { e.preventDefault(); redoEdit(); }
 });
+
+/* ===== Prod/Purch Split Modal ===== */
+async function openPapModal() {
+    if (!current_engine_loaded()) return;
+
+    let papData = {};
+    try {
+        const r = await fetch('/api/pap');
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
+        papData = d.pap || {};
+    } catch (e) { alert('Could not load PAP data: ' + e); return; }
+
+    const existing = document.getElementById('papModal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'papModal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.7);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:40px 16px';
+
+    function buildRows(pap) {
+        if (!Object.keys(pap).length) return '<tr><td colspan="3" class="text-center text-slate-500 p-4">No entries</td></tr>';
+        return Object.entries(pap).map(([mat, frac]) => `
+            <tr data-pap-mat="${mat}">
+                <td class="p-2 font-mono text-xs">${mat}</td>
+                <td class="p-2"><input type="number" min="0" max="1" step="0.01" value="${frac}" class="pap-frac-input bg-slate-700 rounded px-2 py-1 w-28 text-right" /></td>
+                <td class="p-2 flex gap-2">
+                    <button onclick="savePapRow('${mat}', this)" class="px-2 py-1 rounded text-xs bg-blue-700 hover:bg-blue-600">Save</button>
+                    <button onclick="deletePapRow('${mat}')" class="px-2 py-1 rounded text-xs bg-red-800 hover:bg-red-700">Remove</button>
+                </td>
+            </tr>`).join('');
+    }
+
+    modal.innerHTML = `
+      <div style="background:#1e293b;border-radius:12px;padding:24px;width:100%;max-width:600px;color:#e2e8f0">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h2 style="font-size:1.1rem;font-weight:600">&#9881; Prod/Purch Split Fractions</h2>
+          <button onclick="document.getElementById('papModal').remove()" style="background:#334155;border:none;color:#e2e8f0;padding:4px 10px;border-radius:6px;cursor:pointer">&#10005; Close</button>
+        </div>
+        <table class="w-full text-sm mb-6" id="papTable">
+          <thead><tr class="text-slate-400 text-xs"><th class="text-left p-2">Material</th><th class="text-left p-2">Production fraction</th><th class="p-2"></th></tr></thead>
+          <tbody id="papTbody">${buildRows(papData)}</tbody>
+        </table>
+        <div style="border-top:1px solid #334155;padding-top:16px">
+          <h3 style="font-size:0.9rem;font-weight:600;margin-bottom:8px">Add / Update</h3>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="papNewMat" type="text" placeholder="Material number" class="bg-slate-700 rounded px-2 py-1 text-sm w-40" />
+            <input id="papNewFrac" type="number" min="0" max="1" step="0.01" placeholder="Fraction" class="bg-slate-700 rounded px-2 py-1 text-sm w-28" />
+            <button onclick="addPapRow()" class="px-3 py-1 rounded text-sm bg-green-700 hover:bg-green-600">Add / Update</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+async function _applyPapResult(data) {
+    if (data.error) { alert(data.error); return; }
+    state.results = data.results;
+    state.valueResults = data.value_results;
+    state.consolidation = data.consolidation || [];
+    renderPlanningTable(state.results, state.periods);
+    updateTableFromResults(data.results, data.value_results);
+}
+
+async function savePapRow(mat, btn) {
+    const row = btn.closest('tr[data-pap-mat]');
+    const frac = parseFloat(row.querySelector('.pap-frac-input').value);
+    if (isNaN(frac)) { alert('Invalid fraction'); return; }
+    try {
+        const res = await fetch('/api/pap', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ material_number: mat, fraction: frac })
+        });
+        const data = await res.json();
+        await _applyPapResult(data);
+        log(`PAP fraction updated: ${mat} = ${frac}`);
+    } catch (e) { alert('Error: ' + e); }
+}
+
+async function deletePapRow(mat) {
+    if (!confirm(`Remove PAP entry for ${mat}?`)) return;
+    try {
+        const res = await fetch(`/api/pap/${encodeURIComponent(mat)}`, { method: 'DELETE' });
+        const data = await res.json();
+        await _applyPapResult(data);
+        const row = document.querySelector(`tr[data-pap-mat="${mat}"]`);
+        if (row) row.remove();
+        if (!document.querySelector('#papTbody tr[data-pap-mat]'))
+            document.getElementById('papTbody').innerHTML = '<tr><td colspan="3" class="text-center text-slate-500 p-4">No entries</td></tr>';
+        log(`PAP entry removed: ${mat}`);
+    } catch (e) { alert('Error: ' + e); }
+}
+
+async function addPapRow() {
+    const mat = document.getElementById('papNewMat').value.trim();
+    const frac = parseFloat(document.getElementById('papNewFrac').value);
+    if (!mat) { alert('Material number is required'); return; }
+    if (isNaN(frac)) { alert('Fraction is required'); return; }
+    try {
+        const res = await fetch('/api/pap', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ material_number: mat, fraction: frac })
+        });
+        const data = await res.json();
+        await _applyPapResult(data);
+        document.getElementById('papNewMat').value = '';
+        document.getElementById('papNewFrac').value = '';
+        // Refresh modal rows
+        const existing = document.getElementById('papModal');
+        if (existing) existing.remove();
+        openPapModal();
+        log(`PAP fraction set: ${mat} = ${frac}`);
+    } catch (e) { alert('Error: ' + e); }
+}
 
 function filterTable() {
     const s  = document.getElementById('matSearch').value.toLowerCase();

@@ -1053,8 +1053,8 @@ def _apply_volume_change(sess, current_engine, line_type, material_number, perio
                     fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
                     dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
                     child_l03_row.values[p] = fc_val + dep_val
-        l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
-        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+        _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
@@ -1201,8 +1201,8 @@ def _apply_volume_change(sess, current_engine, line_type, material_number, perio
                 current_engine.all_purchase_receipts[child_mat] = child_inv_result['purchase_receipt']
             else:
                 current_engine.all_purchase_receipts.pop(child_mat, None)
-        l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
-        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+        _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
@@ -1289,9 +1289,8 @@ def _apply_volume_change(sess, current_engine, line_type, material_number, perio
                     child_l03_row.values[p] = fc_val + dep_val
 
         # Re-run capacity engine (L09 machine requirements, L10 utilization, L11 FTE, L12)
-        l01_forecasts = {r.material_number: r.values
-                         for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
-        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+        _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
+        cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
         cap_results = cap_eng.calculate()
         for lt, cap_rows in cap_results.items():
             current_engine.results[lt] = cap_rows
@@ -1412,8 +1411,8 @@ def reset_edits():
                 row.manual_edits = {}
 
     # Recalculate capacity and value planning to restore cascade
-    l01_forecasts = {r.material_number: r.values for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])}
-    cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, l01_forecasts)
+    _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
+    cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
     cap_results = cap_eng.calculate()
     for lt, cap_rows in cap_results.items():
         current_engine.results[lt] = cap_rows
@@ -1431,6 +1430,206 @@ def reset_edits():
         'value_results': value_results_dict,
         'consolidation': consolidation,
     })
+
+
+# ---- Prod/Purch Split endpoints ----
+
+def _recalc_one_material(current_engine, mat, inv_eng, bom_eng, periods_list, override_forecast=False):
+    """Recalculate inventory + BOM for one material. Updates results in-place.
+    Returns {child_mat: child_period_demand} so the caller can cascade further."""
+    fc_row = next(
+        (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+         if r.material_number == mat), None
+    )
+    forecast_vals = dict(fc_row.values) if fc_row else {p: 0.0 for p in periods_list}
+
+    mat_l02 = [r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+               if r.material_number == mat]
+    dep_demand_agg = {p: 0.0 for p in periods_list}
+    dep_demand_by_parent = {}
+    for r in mat_l02:
+        parent = r.aux_column
+        if parent:
+            dep_demand_by_parent[parent] = dict(r.values)
+            for p in periods_list:
+                dep_demand_agg[p] = dep_demand_agg.get(p, 0.0) + r.values.get(p, 0.0)
+
+    l05_row = next(
+        (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+         if r.material_number == mat), None
+    )
+    l05_saved_values = dict(l05_row.values) if l05_row else {}
+    l05_saved_edits = dict(l05_row.manual_edits) if l05_row else {}
+
+    kwargs = {'override_forecast': forecast_vals} if override_forecast else {}
+    inv_result = inv_eng.calculate_for_material(
+        mat, forecast_vals, dep_demand_agg, dep_demand_by_parent, **kwargs
+    )
+
+    inv_line_types = [
+        LineType.TOTAL_DEMAND.value, LineType.INVENTORY.value,
+        LineType.MIN_TARGET_STOCK.value, LineType.PRODUCTION_PLAN.value,
+        LineType.PURCHASE_RECEIPT.value, LineType.PURCHASE_PLAN.value,
+    ]
+    for lt in inv_line_types:
+        current_engine.results[lt] = [
+            r for r in current_engine.results.get(lt, []) if r.material_number != mat
+        ]
+    for row in inv_result['rows']:
+        if row.line_type in current_engine.results:
+            current_engine.results[row.line_type].append(row)
+
+    new_l05 = next(
+        (r for r in current_engine.results.get(LineType.MIN_TARGET_STOCK.value, [])
+         if r.material_number == mat), None
+    )
+    if new_l05:
+        new_l05.values = l05_saved_values
+        new_l05.manual_edits = l05_saved_edits
+
+    if inv_result['production_plan'] is not None:
+        current_engine.all_production_plans[mat] = inv_result['production_plan']
+    else:
+        current_engine.all_production_plans.pop(mat, None)
+    if inv_result['purchase_receipt'] is not None:
+        current_engine.all_purchase_receipts[mat] = inv_result['purchase_receipt']
+    else:
+        current_engine.all_purchase_receipts.pop(mat, None)
+
+    # Compute dependent requirements and push updated L02/L03 to children
+    current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value] = [
+        r for r in current_engine.results.get(LineType.DEPENDENT_REQUIREMENTS.value, [])
+        if r.material_number != mat
+    ]
+    children_demand = {}
+    if inv_result['production_plan'] is not None:
+        children_demand = bom_eng.compute_dependent_requirements(mat, inv_result['production_plan'])
+        if children_demand:
+            dr_rows = bom_eng.create_dependent_requirements_rows(mat, children_demand)
+            current_engine.results[LineType.DEPENDENT_REQUIREMENTS.value].extend(dr_rows)
+
+    for child_mat, child_period_demand in children_demand.items():
+        current_engine.results[LineType.DEPENDENT_DEMAND.value] = [
+            r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+            if not (r.material_number == child_mat and r.aux_column == mat)
+        ]
+        child_l02_new = bom_eng.create_dependent_demand_rows(
+            child_mat, {mat: child_period_demand}
+        )
+        current_engine.results[LineType.DEPENDENT_DEMAND.value].extend(child_l02_new)
+
+        child_l01_row = next(
+            (r for r in current_engine.results.get(LineType.DEMAND_FORECAST.value, [])
+             if r.material_number == child_mat), None
+        )
+        child_l03_row = next(
+            (r for r in current_engine.results.get(LineType.TOTAL_DEMAND.value, [])
+             if r.material_number == child_mat), None
+        )
+        if child_l03_row:
+            child_all_l02 = [
+                r for r in current_engine.results.get(LineType.DEPENDENT_DEMAND.value, [])
+                if r.material_number == child_mat
+            ]
+            for p in periods_list:
+                fc_val = child_l01_row.values.get(p, 0.0) if child_l01_row else 0.0
+                dep_val = sum(r.values.get(p, 0.0) for r in child_all_l02)
+                child_l03_row.values[p] = fc_val + dep_val
+
+    return children_demand
+
+
+def _recalc_pap_material(current_engine, material_number):
+    """Re-run inventory + full BOM cascade for a PAP material change.
+    Uses BFS so every child (and grandchild, etc.) gets its inventory recalculated
+    after its dependent demand is updated — not just L02/L03."""
+    from modules.inventory_engine import InventoryEngine
+    from modules.bom_engine import BOMEngine
+
+    inv_eng = InventoryEngine(current_engine.data)
+    bom_eng = BOMEngine(current_engine.data)
+    periods_list = current_engine.data.periods
+
+    # Recalculate the PAP material itself (override_forecast keeps the PAP split intact)
+    children_demand = _recalc_one_material(
+        current_engine, material_number, inv_eng, bom_eng, periods_list,
+        override_forecast=True,
+    )
+
+    # BFS: recalculate every affected child's inventory so the cascade is complete
+    queue = list(children_demand.keys())
+    visited = {material_number}
+    while queue:
+        child_mat = queue.pop(0)
+        if child_mat in visited:
+            continue
+        visited.add(child_mat)
+        grandchildren_demand = _recalc_one_material(
+            current_engine, child_mat, inv_eng, bom_eng, periods_list,
+            override_forecast=False,
+        )
+        queue.extend(gc for gc in grandchildren_demand if gc not in visited)
+
+
+def _finish_pap_recalc(current_engine):
+    """Run capacity + value engines after a PAP fraction change."""
+    from modules.capacity_engine import CapacityEngine
+    from modules.value_planning_engine import ValuePlanningEngine
+
+    _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
+    cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
+    cap_results = cap_eng.calculate()
+    for lt, cap_rows in cap_results.items():
+        current_engine.results[lt] = cap_rows
+    current_engine.value_engine = ValuePlanningEngine(current_engine.data, current_engine.results)
+    current_engine.value_results = current_engine.value_engine.calculate()
+
+
+@app.route('/api/pap', methods=['GET'])
+def get_pap():
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    return jsonify({'pap': dict(current_engine.data.purchased_and_produced)})
+
+
+@app.route('/api/pap', methods=['POST'])
+def set_pap():
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    req = request.get_json() or {}
+    mat = req.get('material_number', '').strip()
+    fraction = req.get('fraction')
+    if not mat:
+        return jsonify({'error': 'material_number is required'}), 400
+    try:
+        fraction = float(fraction)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'fraction must be a number'}), 400
+    current_engine.data.purchased_and_produced[mat] = fraction
+    _recalc_pap_material(current_engine, mat)
+    _finish_pap_recalc(current_engine)
+    results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+    value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+    consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+    return jsonify({'success': True, 'results': results_dict, 'value_results': value_results_dict,
+                    'consolidation': consolidation})
+
+
+@app.route('/api/pap/<material_number>', methods=['DELETE'])
+def delete_pap(material_number):
+    _, current_engine = _get_active()
+    if current_engine is None:
+        return jsonify({'error': 'No calculations run'}), 400
+    current_engine.data.purchased_and_produced.pop(material_number, None)
+    _recalc_pap_material(current_engine, material_number)
+    _finish_pap_recalc(current_engine)
+    results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.results.items()}
+    value_results_dict = {lt: [r.to_dict() for r in rs] for lt, rs in current_engine.value_results.items()}
+    consolidation = [r.to_dict() for r in current_engine.value_results.get(LineType.CONSOLIDATION.value, [])]
+    return jsonify({'success': True, 'results': results_dict, 'value_results': value_results_dict,
+                    'consolidation': consolidation})
 
 
 # ---- Scenario endpoints ----

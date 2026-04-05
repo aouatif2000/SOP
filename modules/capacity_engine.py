@@ -172,7 +172,7 @@ class CapacityEngine:
 
         # 1. Material-level rows: one per (material, routing entry)
         for mat_num, plan_data in self.production_plan.items():
-            routings = self.data.get_all_routings(mat_num)
+            routings = sorted(self.data.get_all_routings(mat_num), key=lambda r: r.work_center)
             if not routings:
                 continue
             material = self.data.materials.get(mat_num)
