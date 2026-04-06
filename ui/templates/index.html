@@ -184,6 +184,13 @@
         <div id="sidebar">
           <div id="sidebar-inner">
             <div style="padding:10px 12px 8px;font-size:13px;font-weight:600;color:#94a3b8;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;gap:8px">&#128193; Files</div>
+            <!-- Upload mode toggle -->
+            <div style="display:flex;border-bottom:1px solid rgba(255,255,255,0.08)">
+              <button id="singleModeBtn" onclick="setUploadMode('single')" style="flex:1;padding:6px 0;font-size:11px;cursor:pointer;border:none;background:rgba(59,130,246,0.2);color:#93c5fd;font-weight:600">Single File</button>
+              <button id="multiModeBtn" onclick="setUploadMode('multi')" style="flex:1;padding:6px 0;font-size:11px;cursor:pointer;border:none;background:transparent;color:#64748b">Multi-File</button>
+            </div>
+            <!-- Single-file drop zone (default) -->
+            <div id="singleUploadZone">
             <div id="sidebarDropZone" class="drop-zone"
                  ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
               <div style="font-size:20px;margin-bottom:5px">&#128193;</div>
@@ -191,6 +198,27 @@
               <label style="display:block;cursor:pointer;color:#3b82f6;font-size:11px;text-decoration:underline;margin-top:5px">or browse
                 <input type="file" accept=".xlsx,.xlsm" class="hidden" id="sidebarFileInput" onchange="uploadFileFromSidebar(event)">
               </label>
+            </div>
+            </div>
+            <!-- Multi-file inputs (hidden by default) -->
+            <div id="multiUploadZone" style="display:none;padding:10px 12px">
+              <div style="margin-bottom:8px">
+                <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">BOM Extract</label>
+                <input type="file" accept=".xlsx,.xlsm,.xls" id="multiBomFile" style="font-size:10px;color:#cbd5e1;width:100%">
+              </div>
+              <div style="margin-bottom:8px">
+                <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">Routing Extract</label>
+                <input type="file" accept=".xlsx,.xlsm,.xls" id="multiRoutingFile" style="font-size:10px;color:#cbd5e1;width:100%">
+              </div>
+              <div style="margin-bottom:8px">
+                <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">Stock Extract</label>
+                <input type="file" accept=".xlsx,.xlsm,.xls" id="multiStockFile" style="font-size:10px;color:#cbd5e1;width:100%">
+              </div>
+              <div style="margin-bottom:8px">
+                <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">Forecast Extract</label>
+                <input type="file" accept=".xlsx,.xlsm,.xls" id="multiForecastFile" style="font-size:10px;color:#cbd5e1;width:100%">
+              </div>
+              <button onclick="uploadMultiFiles()" style="width:100%;padding:6px;font-size:11px;cursor:pointer;border:none;border-radius:6px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-weight:600;margin-top:4px">Upload All</button>
             </div>
             <div id="sessionList"><p style="padding:16px;color:#475569;font-size:12px;text-align:center">No files loaded yet</p></div>
           </div>
@@ -2098,6 +2126,67 @@ async function uploadFileFromSidebar(e) {
     e.target.value = '';
     if (!file) return;
     await _doUpload(file);
+}
+
+function setUploadMode(mode) {
+    const singleBtn = document.getElementById('singleModeBtn');
+    const multiBtn = document.getElementById('multiModeBtn');
+    const singleZone = document.getElementById('singleUploadZone');
+    const multiZone = document.getElementById('multiUploadZone');
+    if (mode === 'multi') {
+        singleZone.style.display = 'none';
+        multiZone.style.display = 'block';
+        singleBtn.style.background = 'transparent'; singleBtn.style.color = '#64748b'; singleBtn.style.fontWeight = '400';
+        multiBtn.style.background = 'rgba(59,130,246,0.2)'; multiBtn.style.color = '#93c5fd'; multiBtn.style.fontWeight = '600';
+    } else {
+        singleZone.style.display = 'block';
+        multiZone.style.display = 'none';
+        singleBtn.style.background = 'rgba(59,130,246,0.2)'; singleBtn.style.color = '#93c5fd'; singleBtn.style.fontWeight = '600';
+        multiBtn.style.background = 'transparent'; multiBtn.style.color = '#64748b'; multiBtn.style.fontWeight = '400';
+    }
+}
+
+async function uploadMultiFiles() {
+    const bomFile = document.getElementById('multiBomFile').files[0];
+    const routingFile = document.getElementById('multiRoutingFile').files[0];
+    const stockFile = document.getElementById('multiStockFile').files[0];
+    const forecastFile = document.getElementById('multiForecastFile').files[0];
+    if (!bomFile || !routingFile || !stockFile || !forecastFile) {
+        alert('Please select all four extract files before uploading.');
+        return;
+    }
+    status('Uploading extract files...');
+    log('Uploading extract files: ' + [bomFile.name, routingFile.name, stockFile.name, forecastFile.name].join(', '));
+    const formData = new FormData();
+    formData.append('bom_file', bomFile);
+    formData.append('routing_file', routingFile);
+    formData.append('stock_file', stockFile);
+    formData.append('forecast_file', forecastFile);
+    try {
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) { alert(data.error); status('Error'); return; }
+        document.getElementById('fileBanner').classList.remove('hidden');
+        document.getElementById('fileName').textContent = data.custom_name || data.filename;
+        document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
+        document.getElementById('kpi-mat').textContent = data.summary.materials;
+        document.getElementById('kpi-bom').textContent = data.summary.bom_items;
+        document.getElementById('calcBtn').disabled = false;
+        if (data.planning_month) document.getElementById('planningMonth').value = data.planning_month;
+        if (data.months_actuals !== undefined) document.getElementById('monthsActuals').value = data.months_actuals;
+        if (data.months_forecast !== undefined) document.getElementById('monthsForecast').value = data.months_forecast;
+        updateHorizonDisplay();
+        state.activeSessionId = data.session_id;
+        log('Extract files loaded: ' + data.filename + (data.planning_month ? ' | Planning month: ' + data.planning_month : ''));
+        _markAutoSaved();
+        status('Click Calculate');
+        await loadSessions();
+        // Reset file inputs
+        document.getElementById('multiBomFile').value = '';
+        document.getElementById('multiRoutingFile').value = '';
+        document.getElementById('multiStockFile').value = '';
+        document.getElementById('multiForecastFile').value = '';
+    } catch (err) { alert('Upload error: ' + err); }
 }
 
 async function loadSessions() {

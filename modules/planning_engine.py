@@ -50,9 +50,11 @@ class PlanningEngine:
         LineType.CONSOLIDATION.value,
     ]
 
-    def __init__(self, file_path: str, planning_month: str = None,
-                 months_actuals: int = 0, months_forecast: int = 12):
+    def __init__(self, file_path: str = None, planning_month: str = None,
+                 months_actuals: int = 0, months_forecast: int = 12,
+                 extract_files: dict = None):
         self.file_path = file_path
+        self.extract_files = extract_files
         self.planning_month = planning_month
         self.months_actuals = months_actuals
         self.months_forecast = months_forecast
@@ -79,7 +81,10 @@ class PlanningEngine:
 
         # ===== STEP 1: Load data =====
         print("\n[STEP 1] Loading raw input data...")
-        self.data = DataLoader(self.file_path)
+        if self.extract_files:
+            self.data = DataLoader(extract_files=self.extract_files)
+        else:
+            self.data = DataLoader(self.file_path)
         self.data.load_all()
 
         # ===== STEP 1b: Apply UI parameter overrides =====

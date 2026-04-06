@@ -18,11 +18,20 @@ from modules.models import (
 
 
 class DataLoader:
-    def __init__(self, file_path: str):
-        self.file_path = Path(file_path)
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        self.excel_file = pd.ExcelFile(file_path)
+    def __init__(self, excel_file=None, extract_files=None):
+        if excel_file is None and extract_files is None:
+            raise ValueError("Either excel_file or extract_files must be provided.")
+
+        self.extract_files = extract_files
+
+        if excel_file is not None:
+            self.file_path = Path(excel_file)
+            if not self.file_path.exists():
+                raise FileNotFoundError(f"File not found: {excel_file}")
+            self.excel_file = pd.ExcelFile(excel_file)
+        else:
+            self.file_path = None
+            self.excel_file = None
 
         self.config: Optional[PlanningConfig] = None
         self.materials: Dict[str, Material] = {}
@@ -54,24 +63,61 @@ class DataLoader:
         self.valuation_params: Optional[ValuationParameters] = None
 
     def load_all(self) -> 'DataLoader':
-        print(f"Loading raw data from: {self.file_path.name}")
+        if self.file_path is not None:
+            print(f"Loading raw data from: {self.file_path.name}")
+        else:
+            print("Loading raw data from extract files")
         print("-" * 60)
-        self._load_config()
-        self._load_fte_config()
-        self._load_materials()
-        self._load_bom()
-        self._load_machines()
-        self._load_routing()
-        self._load_forecasts()
-        self._load_stock_levels()
-        self._load_safety_stock()
-        self._load_purchase_sheet()
-        self._load_purchase_actuals()
+
+        if self.excel_file is not None:
+            self._load_config()
+            self._load_fte_config()
+            self._load_materials()
+        else:
+            # Extract-only mode: provide safe defaults for attributes
+            # normally set by _load_config(), _load_fte_config(), _load_materials()
+            if self.config is None:
+                self.config = PlanningConfig(initial_date=datetime(2025, 12, 1))
+                self.periods = self.config.get_periods()
+            if not hasattr(self, 'forecast_actuals_months'):
+                self.forecast_actuals_months = 12
+
+        if self.extract_files:
+            self._load_bom_from_extract()
+        else:
+            self._load_bom()
+
+        if self.excel_file is not None:
+            self._load_machines()
+
+        if self.extract_files:
+            self._load_routing_from_extract()
+        else:
+            self._load_routing()
+
+        if self.extract_files:
+            self._load_forecast_from_extract()
+        else:
+            self._load_forecasts()
+
+        if self.extract_files:
+            self._load_stock_from_extract()
+        else:
+            self._load_stock_levels()
+
+        if self.excel_file is not None:
+            self._load_safety_stock()
+            self._load_purchase_sheet()
+            self._load_purchase_actuals()
+
         self._calculate_bom_levels()
-        self._load_avg_sales_price()
-        self._load_cost_raw_material()
-        self._load_cost_machine_hour()
-        self._load_valuation_params()
+
+        if self.excel_file is not None:
+            self._load_avg_sales_price()
+            self._load_cost_raw_material()
+            self._load_cost_machine_hour()
+            self._load_valuation_params()
+
         routing_wcs = {
             ri.work_center
             for ris in self.routing.values()
@@ -358,6 +404,149 @@ class DataLoader:
             self.stock[mat]['Value Unrestricted'] += value_unrestricted
             
         print(f"  Stock levels: {len(self.stock_levels)}")
+
+    # ===== Extract-file loaders (multi-file upload mode) =====
+
+    def _load_bom_from_extract(self):
+        """Load BOM data from extract file (S_OP_GTB_BOM_Extract), sheet 'EXP_BOM'.
+
+        Column headers are identical to the 'BOM' tab in the xlsm.
+        Applies the same filtering and transformation logic as _load_bom().
+        """
+        df = pd.read_excel(self.extract_files['bom'], sheet_name='EXP_BOM', header=0)
+        df['Material'] = df['Material'].astype(str)
+        df['Component'] = df['Component'].astype(str)
+        df['Bill of Material'] = df['Bill of Material'].astype(str).str.zfill(8)
+        print(f"  BOM (extract) columns: {list(df.columns)}")
+        for _, row in df.iterrows():
+            parent = str(row.get('Material', '')).strip()
+            component = str(row.get('Component', '')).strip()
+            if not parent or not component or parent == 'nan' or component == 'nan':
+                continue
+            plant = str(row.get('Plant', '')).strip()
+            if self.config and self.config.site and plant and plant != self.config.site:
+                continue
+            qty = row.get('BILLOFMATERIALITEMQUANTITY', 0)
+            if pd.isna(qty) or qty == 0:
+                continue
+            header_qty = row.get('BOM Header Quantity in Base UoM', 1)
+            if pd.isna(header_qty) or header_qty == 0:
+                header_qty = 1
+            qty_per = float(qty) / float(header_qty)
+            is_coproduct = row.get('Co-product', '') == 'X' or float(qty) < 0
+            self.bom.append(BOMItem(
+                plant=str(row.get('Plant', '')),
+                parent_material=parent, parent_name=str(row.get('Material Name', '')),
+                component_material=component, component_name=str(row.get('Component Description', '')),
+                quantity_per=qty_per, bom_header_quantity=float(header_qty),
+                is_coproduct=is_coproduct,
+                production_version=str(row.get('PV', '')) if pd.notna(row.get('PV')) else None
+            ))
+        print(f"  BOM (extract): {len(self.bom)} items")
+
+    def _load_routing_from_extract(self):
+        """Load routing data from extract file (S_OP_GTB_ROUTING_Extract), sheet 'EXP_ROUTING'.
+
+        Column headers are identical to the 'Routing' tab in the xlsm.
+        Applies the same filtering and transformation logic as _load_routing().
+        """
+        df = pd.read_excel(self.extract_files['routing'], sheet_name='EXP_ROUTING', header=0)
+        df['Material'] = df['Material'].astype(str)
+        for _, row in df.iterrows():
+            mat = str(row.get('Material', '')).strip()
+            if not mat or mat == 'nan':
+                continue
+            wc = str(row.get('Work Center', '')).strip()
+            if not wc:
+                continue
+            plant = str(row.get('Plant', '')).strip()
+            if self.config and self.config.site and plant and plant != self.config.site:
+                continue
+            ri = RoutingItem(
+                plant=str(row.get('Plant', '')), material=mat,
+                material_description=str(row.get('Material Description', '')),
+                work_center=wc,
+                base_quantity=float(row.get('Base Quantity', 1)) if pd.notna(row.get('Base Quantity')) else 1,
+                standard_time=float(row.get('Standard Value 01', 0)) if pd.notna(row.get('Standard Value 01')) else 0,
+                production_version=str(row.get('PV', '')) if pd.notna(row.get('PV')) else None
+            )
+            self.routing.setdefault(mat, []).append(ri)
+        print(f"  Routing (extract): {sum(len(v) for v in self.routing.values())} items")
+
+    def _load_stock_from_extract(self):
+        """Load stock data from extract file (S_OP_Stock_Extract), sheet 'SAPUI5 Export'.
+
+        Column headers are identical to the 'Stock level sheet' tab in the xlsm.
+        Applies the same filtering and transformation logic as _load_stock_levels().
+        """
+        df = pd.read_excel(self.extract_files['stock'], sheet_name='SAPUI5 Export', header=0)
+        df['Material'] = df['Material'].astype(str)
+        for _, row in df.iterrows():
+            mat = str(row.get('Material', '')).strip()
+            if not mat or mat == 'nan':
+                continue
+            plant = str(row.get('Plant', '')).strip() if pd.notna(row.get('Plant')) else ''
+            if self.config and self.config.site and plant and plant != self.config.site:
+                continue
+            total_qty = float(row.get('Unrestricted Stock', 0)) if pd.notna(row.get('Unrestricted Stock')) else 0
+            total_value = float(row.get('Total Value', 0)) if pd.notna(row.get('Total Value')) else 0
+            total_stock_qty = float(row.get('Total Stock', 0)) if pd.notna(row.get('Total Stock')) else 0
+            value_unrestricted = float(row.get('Value of Unrestricted Stock', 0)) if pd.notna(row.get('Value of Unrestricted Stock')) else 0
+
+            self.stock_levels[mat] = self.stock_levels.get(mat, 0) + total_qty
+
+            if mat not in self.stock:
+                self.stock[mat] = {'Total Stock': 0, 'Total Value': 0, 'Value Unrestricted': 0}
+            self.stock[mat]['Total Stock'] += total_stock_qty
+            self.stock[mat]['Total Value'] += total_value
+            self.stock[mat]['Value Unrestricted'] += value_unrestricted
+
+        print(f"  Stock levels (extract): {len(self.stock_levels)}")
+
+    def _load_forecast_from_extract(self):
+        """Load forecast data from extract file (S_OP_MST_Ankersmit_Forecast_extract), sheet 'Blad1'.
+
+        Header is on row 5 (index 4). Column 'Product Number Name' contains
+        '<code> - <name>'; the material number is extracted as everything before
+        the first ' - '. Month columns follow the same 'YYYY/MM' + 'M' pattern
+        used by _load_forecasts().
+        """
+        df = pd.read_excel(self.extract_files['forecast'], sheet_name='Blad1', header=4)
+        df.columns = [str(c).strip() for c in df.columns]
+        period_columns = []
+        for col in df.columns:
+            cs = str(col).strip()
+            if '/' in cs and 'M' in cs:
+                try:
+                    parts = cs.replace(' ', '').split('/')
+                    ps = f"{parts[0]}-{parts[1].replace('M', '').zfill(2)}"
+                    period_columns.append((col, ps))
+                except:
+                    pass
+        if period_columns:
+            self.forecast_first_period = period_columns[0][1]
+        if not hasattr(self, 'forecast_actuals_months'):
+            self.forecast_actuals_months = len(period_columns)
+        for _, row in df.iterrows():
+            raw_name = str(row.get('Product Number Name', '')).strip()
+            if not raw_name or raw_name == 'nan':
+                continue
+            mn = raw_name.split(' - ')[0].strip()
+            if not mn:
+                continue
+            fd = {}
+            for col, ps in period_columns:
+                val = row.get(col)
+                if pd.notna(val):
+                    fd[ps] = float(val)
+            mat = self.materials.get(mn)
+            if mat and not mat.is_active:
+                continue
+            if mat and fd is not None:
+                self.forecasts[mn] = fd if fd else {}
+            elif fd:
+                self.forecasts[mn] = fd
+        print(f"  Forecasts (extract): {len(self.forecasts)} materials")
 
     def _load_safety_stock(self):
         df = pd.read_excel(self.excel_file, sheet_name='Safety stock')

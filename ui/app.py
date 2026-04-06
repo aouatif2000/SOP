@@ -50,6 +50,7 @@ def _save_sessions_to_disk():
             serializable[sid] = {
                 'id':           sess.get('id', sid),
                 'file_path':    sess.get('file_path', ''),
+                'extract_files': sess.get('extract_files'),
                 'filename':     sess.get('filename', ''),
                 'custom_name':  sess.get('custom_name'),
                 'metadata':     sess.get('metadata', {}),
@@ -79,6 +80,7 @@ def _load_sessions_from_disk():
             sessions[sid] = {
                 'id':            data.get('id', sid),
                 'file_path':     data.get('file_path', ''),
+                'extract_files': data.get('extract_files'),
                 'filename':      data.get('filename', ''),
                 'custom_name':   data.get('custom_name'),
                 'engine':        None,   # must re-calculate after restart
@@ -149,7 +151,9 @@ def _autorun_sessions():
     def _worker():
         candidates = [
             (sid, sess) for sid, sess in sessions.items()
-            if sess.get('parameters') is not None and Path(sess.get('file_path', '')).exists()
+            if sess.get('parameters') is not None and (
+                sess.get('extract_files') or Path(sess.get('file_path', '')).exists()
+            )
         ]
         if not candidates:
             print('[autorun] No sessions to restore.')
@@ -169,6 +173,7 @@ def _autorun_sessions():
                     planning_month=planning_month,
                     months_actuals=months_actuals,
                     months_forecast=months_forecast,
+                    extract_files=sess.get('extract_files'),
                 )
                 engine.run()
                 _replay_pending_edits(sess, engine)
@@ -202,6 +207,82 @@ def index():
 def upload_file():
     global sessions, active_session_id
 
+    upload_dir = Path(__file__).parent.parent / 'uploads'
+    upload_dir.mkdir(exist_ok=True)
+
+    # Detect multi-file mode vs single-file mode
+    extract_keys = ['bom_file', 'routing_file', 'stock_file', 'forecast_file']
+    is_multi = all(k in request.files for k in extract_keys)
+
+    if is_multi:
+        # --- Multi-file upload mode ---
+        saved_paths = {}
+        key_map = {'bom_file': 'bom', 'routing_file': 'routing',
+                    'stock_file': 'stock', 'forecast_file': 'forecast'}
+        for form_key, dict_key in key_map.items():
+            f = request.files[form_key]
+            if f.filename == '':
+                return jsonify({'error': f'No file selected for {form_key}'}), 400
+            fp = upload_dir / f.filename
+            f.save(str(fp))
+            saved_paths[dict_key] = str(fp)
+
+        try:
+            from modules.data_loader import DataLoader
+            loader = DataLoader(extract_files=saved_paths)
+            loader.load_all()
+
+            site = getattr(loader.config, 'site', '') or ''
+            _idate = getattr(loader.config, 'initial_date', None)
+            planning_month = _idate.strftime('%Y-%m') if _idate else ''
+            months_actuals = getattr(loader, 'forecast_actuals_months', 12)
+            months_forecast = getattr(loader.config, 'forecast_months', 12)
+
+            bom_filename = request.files['bom_file'].filename
+            session_id = str(_uuid.uuid4())
+            sessions[session_id] = {
+                'id': session_id,
+                'file_path': '',
+                'extract_files': saved_paths,
+                'filename': bom_filename,
+                'custom_name': None,
+                'engine': None,
+                'value_results': {},
+                'metadata': {
+                    'materials': len(loader.materials),
+                    'bom_items': len(loader.bom),
+                    'machines': len(loader.machines),
+                    'periods': len(loader.periods),
+                    'site': site,
+                    'planning_month': planning_month,
+                },
+                'uploaded_at': datetime.now().isoformat(),
+            }
+            sessions[session_id]['undo_stack'] = []
+            sessions[session_id]['redo_stack'] = []
+            sessions[session_id]['pending_edits'] = {}
+            active_session_id = session_id
+            _save_sessions_to_disk()
+
+            return jsonify({
+                'success': True,
+                'session_id': session_id,
+                'filename': bom_filename,
+                'planning_month': planning_month,
+                'months_actuals': months_actuals,
+                'months_forecast': months_forecast,
+                'summary': {
+                    'materials': len(loader.materials),
+                    'bom_items': len(loader.bom),
+                    'machines': len(loader.machines),
+                    'periods': len(loader.periods),
+                }
+            })
+        except Exception as e:
+            import traceback
+            return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+    # --- Single-file upload mode (existing behavior) ---
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
 
@@ -209,20 +290,15 @@ def upload_file():
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
 
-    upload_dir = Path(__file__).parent.parent / 'uploads'
-    upload_dir.mkdir(exist_ok=True)
-
     file_path = upload_dir / file.filename
     file.save(str(file_path))
 
     try:
-        # Load metadata only — full calculation is triggered by /api/calculate
         from modules.data_loader import DataLoader
         loader = DataLoader(str(file_path))
         loader.load_all()
 
         site = getattr(loader.config, 'site', '') or ''
-        # Derive planning_month from Config initial_date (YYYY-MM format for <input type="month">)
         _idate = getattr(loader.config, 'initial_date', None)
         planning_month = _idate.strftime('%Y-%m') if _idate else ''
         months_actuals = getattr(loader, 'forecast_actuals_months', 12)
@@ -313,7 +389,8 @@ def run_calculations():
             sess['file_path'],
             planning_month=planning_month,
             months_actuals=months_actuals,
-            months_forecast=months_forecast
+            months_forecast=months_forecast,
+            extract_files=sess.get('extract_files'),
         )
         engine.run()
         sess['engine'] = engine
