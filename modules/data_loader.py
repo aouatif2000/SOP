@@ -69,19 +69,13 @@ class DataLoader:
             print("Loading raw data from extract files")
         print("-" * 60)
 
+        # Always load config/materials/machines from xlsm when available
         if self.excel_file is not None:
             self._load_config()
             self._load_fte_config()
             self._load_materials()
-        else:
-            # Extract-only mode: provide safe defaults for attributes
-            # normally set by _load_config(), _load_fte_config(), _load_materials()
-            if self.config is None:
-                self.config = PlanningConfig(initial_date=datetime(2025, 12, 1))
-                self.periods = self.config.get_periods()
-            if not hasattr(self, 'forecast_actuals_months'):
-                self.forecast_actuals_months = 12
 
+        # BOM: extract file takes priority, else xlsm
         if self.extract_files:
             self._load_bom_from_extract()
         else:
@@ -90,16 +84,19 @@ class DataLoader:
         if self.excel_file is not None:
             self._load_machines()
 
+        # Routing: extract file takes priority, else xlsm
         if self.extract_files:
             self._load_routing_from_extract()
         else:
             self._load_routing()
 
+        # Forecast: extract file takes priority, else xlsm
         if self.extract_files:
             self._load_forecast_from_extract()
         else:
             self._load_forecasts()
 
+        # Stock: extract file takes priority, else xlsm
         if self.extract_files:
             self._load_stock_from_extract()
         else:

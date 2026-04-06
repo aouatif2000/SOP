@@ -82,7 +82,7 @@ class PlanningEngine:
         # ===== STEP 1: Load data =====
         print("\n[STEP 1] Loading raw input data...")
         if self.extract_files:
-            self.data = DataLoader(extract_files=self.extract_files)
+            self.data = DataLoader(excel_file=self.file_path, extract_files=self.extract_files)
         else:
             self.data = DataLoader(self.file_path)
         self.data.load_all()

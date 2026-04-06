@@ -203,6 +203,10 @@
             <!-- Multi-file inputs (hidden by default) -->
             <div id="multiUploadZone" style="display:none;padding:10px 12px">
               <div style="margin-bottom:8px">
+                <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">S&amp;OP Base File (.xlsm)</label>
+                <input type="file" accept=".xlsm" id="multiBaseFile" style="font-size:10px;color:#cbd5e1;width:100%">
+              </div>
+              <div style="margin-bottom:8px">
                 <label style="display:block;font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600">BOM Extract</label>
                 <input type="file" accept=".xlsx,.xlsm,.xls" id="multiBomFile" style="font-size:10px;color:#cbd5e1;width:100%">
               </div>
@@ -2147,17 +2151,23 @@ function setUploadMode(mode) {
 }
 
 async function uploadMultiFiles() {
+    const baseFile = document.getElementById('multiBaseFile').files[0];
     const bomFile = document.getElementById('multiBomFile').files[0];
     const routingFile = document.getElementById('multiRoutingFile').files[0];
     const stockFile = document.getElementById('multiStockFile').files[0];
     const forecastFile = document.getElementById('multiForecastFile').files[0];
+    if (!baseFile) {
+        alert('Please select the S&OP Base File (.xlsm) before uploading.');
+        return;
+    }
     if (!bomFile || !routingFile || !stockFile || !forecastFile) {
         alert('Please select all four extract files before uploading.');
         return;
     }
     status('Uploading extract files...');
-    log('Uploading extract files: ' + [bomFile.name, routingFile.name, stockFile.name, forecastFile.name].join(', '));
+    log('Uploading extract files: ' + [baseFile.name, bomFile.name, routingFile.name, stockFile.name, forecastFile.name].join(', '));
     const formData = new FormData();
+    formData.append('base_file', baseFile);
     formData.append('bom_file', bomFile);
     formData.append('routing_file', routingFile);
     formData.append('stock_file', stockFile);
@@ -2182,6 +2192,7 @@ async function uploadMultiFiles() {
         status('Click Calculate');
         await loadSessions();
         // Reset file inputs
+        document.getElementById('multiBaseFile').value = '';
         document.getElementById('multiBomFile').value = '';
         document.getElementById('multiRoutingFile').value = '';
         document.getElementById('multiStockFile').value = '';

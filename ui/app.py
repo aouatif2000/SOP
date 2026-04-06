@@ -216,6 +216,13 @@ def upload_file():
 
     if is_multi:
         # --- Multi-file upload mode ---
+        # Save and validate the base xlsm file
+        if 'base_file' not in request.files or request.files['base_file'].filename == '':
+            return jsonify({'error': 'No base file (.xlsm) selected'}), 400
+        base_f = request.files['base_file']
+        base_file_path = upload_dir / base_f.filename
+        base_f.save(str(base_file_path))
+
         saved_paths = {}
         key_map = {'bom_file': 'bom', 'routing_file': 'routing',
                     'stock_file': 'stock', 'forecast_file': 'forecast'}
@@ -229,7 +236,7 @@ def upload_file():
 
         try:
             from modules.data_loader import DataLoader
-            loader = DataLoader(extract_files=saved_paths)
+            loader = DataLoader(excel_file=str(base_file_path), extract_files=saved_paths)
             loader.load_all()
 
             site = getattr(loader.config, 'site', '') or ''
@@ -242,7 +249,7 @@ def upload_file():
             session_id = str(_uuid.uuid4())
             sessions[session_id] = {
                 'id': session_id,
-                'file_path': '',
+                'file_path': str(base_file_path),
                 'extract_files': saved_paths,
                 'filename': bom_filename,
                 'custom_name': None,
