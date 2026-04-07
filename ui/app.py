@@ -238,6 +238,33 @@ def upload_file():
             from modules.data_loader import DataLoader
             loader = DataLoader(excel_file=str(base_file_path), extract_files=saved_paths)
             loader.load_all()
+        except Exception as e:
+            import traceback
+            print(f'[upload-multi] load error: {traceback.format_exc()}')
+            return jsonify({'error': 'The uploaded file could not be read. It may be corrupted or in an unsupported format.'}), 400
+
+        try:
+            # Validate required data after successful load
+            missing = []
+            if not getattr(loader, 'materials', None):
+                missing.append('materials')
+            if not getattr(loader, 'bom', None):
+                missing.append('bom')
+            if not getattr(loader, 'routing', None):
+                missing.append('routing')
+            if not getattr(loader, 'machines', None):
+                missing.append('machines')
+            if not getattr(loader, 'forecasts', None):
+                missing.append('forecasts')
+            if not getattr(loader, 'periods', None):
+                missing.append('periods')
+            if getattr(loader, 'config', None) is None:
+                missing.append('config')
+            if missing:
+                return jsonify({
+                    'error': 'The uploaded file is missing required data. Please check that all expected sheets and columns are present.',
+                    'missing': missing
+                }), 400
 
             site = getattr(loader.config, 'site', '') or ''
             _idate = getattr(loader.config, 'initial_date', None)
@@ -287,7 +314,8 @@ def upload_file():
             })
         except Exception as e:
             import traceback
-            return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+            print(f'[upload-multi] session error: {traceback.format_exc()}')
+            return jsonify({'error': 'The uploaded file could not be read. It may be corrupted or in an unsupported format.'}), 400
 
     # --- Single-file upload mode (existing behavior) ---
     if 'file' not in request.files:
@@ -304,6 +332,33 @@ def upload_file():
         from modules.data_loader import DataLoader
         loader = DataLoader(str(file_path))
         loader.load_all()
+    except Exception as e:
+        import traceback
+        print(f'[upload-single] load error: {traceback.format_exc()}')
+        return jsonify({'error': 'The uploaded file could not be read. It may be corrupted or in an unsupported format.'}), 400
+
+    try:
+        # Validate required data after successful load
+        missing = []
+        if not getattr(loader, 'materials', None):
+            missing.append('materials')
+        if not getattr(loader, 'bom', None):
+            missing.append('bom')
+        if not getattr(loader, 'routing', None):
+            missing.append('routing')
+        if not getattr(loader, 'machines', None):
+            missing.append('machines')
+        if not getattr(loader, 'forecasts', None):
+            missing.append('forecasts')
+        if not getattr(loader, 'periods', None):
+            missing.append('periods')
+        if getattr(loader, 'config', None) is None:
+            missing.append('config')
+        if missing:
+            return jsonify({
+                'error': 'The uploaded file is missing required data. Please check that all expected sheets and columns are present.',
+                'missing': missing
+            }), 400
 
         site = getattr(loader.config, 'site', '') or ''
         _idate = getattr(loader.config, 'initial_date', None)
@@ -351,7 +406,8 @@ def upload_file():
         })
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+        print(f'[upload-single] session error: {traceback.format_exc()}')
+        return jsonify({'error': 'The uploaded file could not be read. It may be corrupted or in an unsupported format.'}), 400
 
 
 @app.route('/api/calculate', methods=['POST'])
@@ -1494,6 +1550,12 @@ def reset_edits():
                     row.set_value(period, edit_data['original'])
                 row.manual_edits = {}
 
+    # Clear persisted pending_edits so they are not replayed on reload
+    sess, _ = _get_active()
+    if sess is not None:
+        sess['pending_edits'] = {}
+        _save_sessions_to_disk()
+
     # Recalculate capacity and value planning to restore cascade
     _all_line_data = {lt: {r.material_number: r.values for r in rows} for lt, rows in current_engine.results.items() if rows}
     cap_eng = CapacityEngine(current_engine.data, current_engine.all_production_plans, _all_line_data)
@@ -2076,7 +2138,21 @@ def rename_session():
         return jsonify({'error': 'Name cannot be empty'}), 400
     sessions[session_id]['custom_name'] = new_name
     _save_sessions_to_disk()
-    return jsonify({'success': True, 'session_id': session_id, 'custom_name': new_name})
+    sess = sessions[session_id]
+    return jsonify({
+        'success': True,
+        'session_id': session_id,
+        'custom_name': new_name,
+        'session': {
+            'id': sess.get('id', session_id),
+            'filename': sess.get('filename', ''),
+            'custom_name': sess.get('custom_name'),
+            'metadata': sess.get('metadata', {}),
+            'uploaded_at': sess.get('uploaded_at', ''),
+            'planning_month': (sess.get('metadata') or {}).get('planning_month', ''),
+            'calculated': sess.get('engine') is not None,
+        }
+    })
 
 
 @app.route('/api/sessions/switch', methods=['POST'])

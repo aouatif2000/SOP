@@ -236,6 +236,16 @@
         <span class="text-blue-400 text-sm" id="fileStats">-</span>
         <span id="autosave-badge" class="ml-auto text-xs text-slate-500 hidden">&#10003; Auto-saved <span id="autosave-time"></span></span>
     </div>
+    <div id="uploadErrorBanner" class="hidden bg-red-900/70 border-b border-red-600 py-3 px-4">
+        <div class="flex items-start gap-3 max-w-7xl mx-auto">
+            <span class="text-red-400 text-lg flex-shrink-0">&#9888;</span>
+            <div class="flex-1 min-w-0">
+                <p id="uploadErrorMsg" class="text-red-200 text-sm font-medium"></p>
+                <p id="uploadErrorMissing" class="text-red-300/80 text-xs mt-1 hidden"></p>
+            </div>
+            <button onclick="_hideUploadError()" class="text-red-400 hover:text-red-200 flex-shrink-0 text-lg leading-none">&times;</button>
+        </div>
+    </div>
     <div id="horizonBanner" class="hidden bg-indigo-900/40 border-b border-indigo-700/50 py-2 px-4 flex items-center gap-3">
         <span class="text-indigo-400 text-xs font-semibold uppercase tracking-wide">Horizon</span>
         <span class="text-indigo-200 text-sm" id="horizonText">-</span>
@@ -1600,17 +1610,18 @@ async function resetAllEdits() {
     if (!current_engine_loaded()) return;
     if (!confirm('Reset all manual edits? This will restore all values to their original calculated state.')) return;
     try {
+        state.cellEdits = {};
+        _syncPendingEditsToServer();
         const res = await fetch('/api/reset_edits', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
             state.results = data.results;
             state.valueResults = data.value_results;
-            state.cellEdits = {};
             updateEditBadge();
-            _syncPendingEditsToServer();
             renderPlanningTable(state.results, state.periods);
             updateTableFromResults(data.results, null);
             if (data.consolidation) updateConsolidation(data.consolidation);
+            await renderDashboard();
             log('All edits reset to original values.');
             _markAutoSaved();
         } else {
@@ -2090,16 +2101,38 @@ function fmtVal(n) {
     return sign + abs.toFixed(abs < 10 ? 2 : 0);
 }
 
+// ===== UPLOAD ERROR BANNER =====
+function _showUploadError(message, missingFields) {
+    const banner = document.getElementById('uploadErrorBanner');
+    const msgEl = document.getElementById('uploadErrorMsg');
+    const missingEl = document.getElementById('uploadErrorMissing');
+    if (!banner || !msgEl) return;
+    msgEl.textContent = message;
+    if (missingFields && missingFields.length) {
+        missingEl.textContent = 'Missing: ' + missingFields.join(', ');
+        missingEl.classList.remove('hidden');
+    } else {
+        missingEl.textContent = '';
+        missingEl.classList.add('hidden');
+    }
+    banner.classList.remove('hidden');
+}
+function _hideUploadError() {
+    const banner = document.getElementById('uploadErrorBanner');
+    if (banner) banner.classList.add('hidden');
+}
+
 // ===== SESSION SIDEBAR =====
 async function _doUpload(file) {
     status('Uploading ' + file.name + '...');
     log('Uploading ' + file.name);
+    _hideUploadError();
     const formData = new FormData();
     formData.append('file', file);
     try {
         const res = await fetch('/api/upload', { method: 'POST', body: formData });
         const data = await res.json();
-        if (data.error) { alert(data.error); return; }
+        if (data.error) { _showUploadError(data.error, data.missing); status('Error'); return; }
         document.getElementById('fileBanner').classList.remove('hidden');
         document.getElementById('fileName').textContent = data.custom_name || data.filename;
         document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
@@ -2165,6 +2198,7 @@ async function uploadMultiFiles() {
         return;
     }
     status('Uploading extract files...');
+    _hideUploadError();
     log('Uploading extract files: ' + [baseFile.name, bomFile.name, routingFile.name, stockFile.name, forecastFile.name].join(', '));
     const formData = new FormData();
     formData.append('base_file', baseFile);
@@ -2175,7 +2209,7 @@ async function uploadMultiFiles() {
     try {
         const res = await fetch('/api/upload', { method: 'POST', body: formData });
         const data = await res.json();
-        if (data.error) { alert(data.error); status('Error'); return; }
+        if (data.error) { _showUploadError(data.error, data.missing); status('Error'); return; }
         document.getElementById('fileBanner').classList.remove('hidden');
         document.getElementById('fileName').textContent = data.custom_name || data.filename;
         document.getElementById('fileStats').textContent = `${data.summary.materials} materials | ${data.summary.bom_items} BOM | ${data.summary.machines} machines`;
@@ -2197,7 +2231,7 @@ async function uploadMultiFiles() {
         document.getElementById('multiRoutingFile').value = '';
         document.getElementById('multiStockFile').value = '';
         document.getElementById('multiForecastFile').value = '';
-    } catch (err) { alert('Upload error: ' + err); }
+    } catch (err) { _showUploadError('Upload error: ' + err); status('Error'); }
 }
 
 async function loadSessions() {
@@ -2348,6 +2382,8 @@ function _commitRename(el) {
             // Update file banner if this is the active session
             const banner = document.getElementById('fileName');
             if (banner && el.closest('.session-item.active')) banner.textContent = newName;
+            // Re-render the session list to reflect the new name
+            loadSessions();
         } else {
             el.textContent = orig;
         }
